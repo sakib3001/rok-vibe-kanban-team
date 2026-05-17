@@ -22,3 +22,4 @@
 0021-fix-scope-org-selection-persistence-per-authenticated-user.patch
 0022-fix-hide-cloud-shutdown-banner.patch
 0023-feat-add-Kimi-Code-CLI-support.patch
+0024-fix-add-missing-KimiCode-type-declaration-in-generat.patch
