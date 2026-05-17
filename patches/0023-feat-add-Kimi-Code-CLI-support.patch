@@ -1,0 +1,475 @@
+From 0853a9b12584c56c3e162261920af48a4467d168 Mon Sep 17 00:00:00 2001
+From: Riajul Islam <kmriajulislami@gmail.com>
+Date: Sun, 17 May 2026 18:02:14 +0600
+Subject: [PATCH] feat: add Kimi Code CLI support
+
+Add Kimi Code CLI as a new backend executor using ACP protocol.
+Supports model override, yolo auto-approve, and session resumption.
+Includes frontend icons and JSON schema generation.
+---
+ crates/executors/default_profiles.json        |   7 +
+ crates/executors/src/executors/kimi.rs        | 213 ++++++++++++++++++
+ crates/executors/src/executors/mod.rs         |   6 +-
+ crates/executors/src/mcp_config.rs            |   2 +-
+ crates/local-deployment/src/container.rs      |   1 +
+ crates/server/src/bin/generate_types.rs       |   4 +
+ packages/public/agents/kimi-dark.svg          |   3 +
+ packages/public/agents/kimi-light.svg         |   3 +
+ .../src/shared/components/AgentIcon.tsx       |   5 +
+ shared/schemas/kimi_code.json                 |  58 +++++
+ shared/types.ts                               |   6 +-
+ 11 files changed, 302 insertions(+), 6 deletions(-)
+ create mode 100644 crates/executors/src/executors/kimi.rs
+ create mode 100644 packages/public/agents/kimi-dark.svg
+ create mode 100644 packages/public/agents/kimi-light.svg
+ create mode 100644 shared/schemas/kimi_code.json
+
+diff --git a/crates/executors/default_profiles.json b/crates/executors/default_profiles.json
+index 3a95f74b4..70356c477 100644
+--- a/crates/executors/default_profiles.json
++++ b/crates/executors/default_profiles.json
+@@ -42,6 +42,13 @@
+         }
+       }
+     },
++    "KIMI_CODE": {
++      "DEFAULT": {
++        "KIMI_CODE": {
++          "yolo": true
++        }
++      }
++    },
+     "CURSOR_AGENT": {
+       "DEFAULT": {
+         "CURSOR_AGENT": {
+diff --git a/crates/executors/src/executors/kimi.rs b/crates/executors/src/executors/kimi.rs
+new file mode 100644
+index 000000000..95489ee89
+--- /dev/null
++++ b/crates/executors/src/executors/kimi.rs
+@@ -0,0 +1,213 @@
++use std::{path::Path, sync::Arc};
++
++use async_trait::async_trait;
++use derivative::Derivative;
++use schemars::JsonSchema;
++use serde::{Deserialize, Serialize};
++use ts_rs::TS;
++use workspace_utils::msg_store::MsgStore;
++
++use crate::{
++    approvals::ExecutorApprovalService,
++    command::{CmdOverrides, CommandBuildError, CommandBuilder, apply_overrides},
++    env::ExecutionEnv,
++    executor_discovery::ExecutorDiscoveredOptions,
++    executors::{
++        AppendPrompt, AvailabilityInfo, BaseCodingAgent, ExecutorError, SpawnedChild,
++        StandardCodingAgentExecutor, acp::AcpAgentHarness,
++    },
++    logs::utils::patch,
++    model_selector::{ModelSelectorConfig, PermissionPolicy},
++    profile::ExecutorConfig,
++};
++
++#[derive(Derivative, Clone, Serialize, Deserialize, TS, JsonSchema)]
++#[derivative(Debug, PartialEq)]
++pub struct KimiCode {
++    #[serde(default)]
++    pub append_prompt: AppendPrompt,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub model: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub yolo: Option<bool>,
++    #[serde(flatten)]
++    pub cmd: CmdOverrides,
++    #[serde(skip)]
++    #[ts(skip)]
++    #[derivative(Debug = "ignore", PartialEq = "ignore")]
++    pub approvals: Option<Arc<dyn ExecutorApprovalService>>,
++}
++
++impl KimiCode {
++    fn build_command_builder(&self) -> Result<CommandBuilder, CommandBuildError> {
++        let mut builder = CommandBuilder::new("kimi");
++
++        if let Some(model) = &self.model {
++            builder = builder.extend_params(["--model", model.as_str()]);
++        }
++
++        if self.yolo.unwrap_or(false) {
++            builder = builder.extend_params(["--yolo"]);
++        }
++
++        builder = builder.extend_params(["acp"]);
++
++        apply_overrides(builder, &self.cmd)
++    }
++}
++
++#[async_trait]
++impl StandardCodingAgentExecutor for KimiCode {
++    fn apply_overrides(&mut self, executor_config: &ExecutorConfig) {
++        if let Some(model_id) = &executor_config.model_id {
++            self.model = Some(model_id.clone());
++        }
++        if let Some(permission_policy) = executor_config.permission_policy.clone() {
++            self.yolo = Some(matches!(
++                permission_policy,
++                crate::model_selector::PermissionPolicy::Auto
++            ));
++        }
++    }
++
++    fn use_approvals(&mut self, approvals: Arc<dyn ExecutorApprovalService>) {
++        self.approvals = Some(approvals);
++    }
++
++    async fn spawn(
++        &self,
++        current_dir: &Path,
++        prompt: &str,
++        env: &ExecutionEnv,
++    ) -> Result<SpawnedChild, ExecutorError> {
++        let harness = AcpAgentHarness::with_session_namespace("kimi_sessions");
++        let combined_prompt = self.append_prompt.combine_prompt(prompt);
++        let kimi_command = self.build_command_builder()?.build_initial()?;
++        let approvals = if self.yolo.unwrap_or(false) {
++            None
++        } else {
++            self.approvals.clone()
++        };
++        harness
++            .spawn_with_command(
++                current_dir,
++                combined_prompt,
++                kimi_command,
++                env,
++                &self.cmd,
++                approvals,
++            )
++            .await
++    }
++
++    async fn spawn_follow_up(
++        &self,
++        current_dir: &Path,
++        prompt: &str,
++        session_id: &str,
++        _reset_to_message_id: Option<&str>,
++        env: &ExecutionEnv,
++    ) -> Result<SpawnedChild, ExecutorError> {
++        let harness = AcpAgentHarness::with_session_namespace("kimi_sessions");
++        let combined_prompt = self.append_prompt.combine_prompt(prompt);
++        let kimi_command = self.build_command_builder()?.build_follow_up(&[])?;
++        let approvals = if self.yolo.unwrap_or(false) {
++            None
++        } else {
++            self.approvals.clone()
++        };
++        harness
++            .spawn_follow_up_with_command(
++                current_dir,
++                combined_prompt,
++                session_id,
++                kimi_command,
++                env,
++                &self.cmd,
++                approvals,
++            )
++            .await
++    }
++
++    fn normalize_logs(
++        &self,
++        msg_store: Arc<MsgStore>,
++        worktree_path: &Path,
++    ) -> Vec<tokio::task::JoinHandle<()>> {
++        crate::executors::acp::normalize_logs(msg_store, worktree_path)
++    }
++
++    fn default_mcp_config_path(&self) -> Option<std::path::PathBuf> {
++        dirs::home_dir().map(|home| home.join(".kimi").join("mcp.json"))
++    }
++
++    fn get_availability_info(&self) -> AvailabilityInfo {
++        let binary_found = workspace_utils::shell::resolve_executable_path_blocking("kimi")
++            .is_some();
++        if !binary_found {
++            return AvailabilityInfo::NotFound;
++        }
++
++        if let Some(timestamp) = dirs::home_dir()
++            .and_then(|home| {
++                std::fs::metadata(home.join(".kimi").join("credentials").join("kimi-code.json"))
++                    .ok()
++            })
++            .and_then(|m| m.modified().ok())
++            .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
++            .map(|d| d.as_secs() as i64)
++        {
++            return AvailabilityInfo::LoginDetected {
++                last_auth_timestamp: timestamp,
++            };
++        }
++
++        let mcp_config_found = self
++            .default_mcp_config_path()
++            .map(|p| p.exists())
++            .unwrap_or(false);
++
++        let config_found = dirs::home_dir()
++            .map(|home| home.join(".kimi").join("config.toml").exists())
++            .unwrap_or(false);
++
++        if mcp_config_found || config_found {
++            AvailabilityInfo::InstallationFound
++        } else {
++            AvailabilityInfo::NotFound
++        }
++    }
++
++    fn get_preset_options(&self) -> ExecutorConfig {
++        use crate::model_selector::*;
++        ExecutorConfig {
++            executor: BaseCodingAgent::KimiCode,
++            variant: None,
++            model_id: self.model.clone(),
++            agent_id: None,
++            reasoning_id: None,
++            permission_policy: Some(if self.yolo.unwrap_or(false) {
++                PermissionPolicy::Auto
++            } else {
++                PermissionPolicy::Supervised
++            }),
++        }
++    }
++
++    async fn discover_options(
++        &self,
++        _workdir: Option<&std::path::Path>,
++        _repo_path: Option<&std::path::Path>,
++    ) -> Result<futures::stream::BoxStream<'static, json_patch::Patch>, ExecutorError> {
++        let options = ExecutorDiscoveredOptions {
++            model_selector: ModelSelectorConfig {
++                permissions: vec![PermissionPolicy::Auto, PermissionPolicy::Supervised],
++                ..Default::default()
++            },
++            ..Default::default()
++        };
++        Ok(Box::pin(futures::stream::once(async move {
++            patch::executor_discovered_options(options)
++        })))
++    }
++}
+diff --git a/crates/executors/src/executors/mod.rs b/crates/executors/src/executors/mod.rs
+index 1126d0917..1a2aff1fe 100644
+--- a/crates/executors/src/executors/mod.rs
++++ b/crates/executors/src/executors/mod.rs
+@@ -23,7 +23,7 @@ use crate::{
+     env::ExecutionEnv,
+     executors::{
+         amp::Amp, claude::ClaudeCode, codex::Codex, copilot::Copilot, cursor::CursorAgent,
+-        droid::Droid, gemini::Gemini, opencode::Opencode, qwen::QwenCode,
++        droid::Droid, gemini::Gemini, kimi::KimiCode, opencode::Opencode, qwen::QwenCode,
+     },
+     logs::utils::patch,
+     mcp_config::McpConfig,
+@@ -38,6 +38,7 @@ pub mod copilot;
+ pub mod cursor;
+ pub mod droid;
+ pub mod gemini;
++pub mod kimi;
+ pub mod opencode;
+ #[cfg(feature = "qa-mode")]
+ pub mod qa_mock;
+@@ -117,6 +118,7 @@ pub enum CodingAgent {
+     #[strum_discriminants(strum(serialize = "CURSOR", serialize = "CURSOR_AGENT"))]
+     CursorAgent,
+     QwenCode,
++    KimiCode,
+     Copilot,
+     Droid,
+     #[cfg(feature = "qa-mode")]
+@@ -189,7 +191,7 @@ impl CodingAgent {
+                 BaseAgentCapability::SetupHelper,
+                 BaseAgentCapability::ContextUsage,
+             ],
+-            Self::Gemini(_) | Self::QwenCode(_) => {
++            Self::Gemini(_) | Self::QwenCode(_) | Self::KimiCode(_) => {
+                 vec![BaseAgentCapability::SessionFork]
+             }
+             Self::CursorAgent(_) => vec![BaseAgentCapability::SetupHelper],
+diff --git a/crates/executors/src/mcp_config.rs b/crates/executors/src/mcp_config.rs
+index e792567b5..6b167ea8b 100644
+--- a/crates/executors/src/mcp_config.rs
++++ b/crates/executors/src/mcp_config.rs
+@@ -397,7 +397,7 @@ impl CodingAgent {
+         use Adapter::*;
+ 
+         let adapter = match self {
+-            CodingAgent::ClaudeCode(_) | CodingAgent::Amp(_) | CodingAgent::Droid(_) => Passthrough,
++            CodingAgent::ClaudeCode(_) | CodingAgent::Amp(_) | CodingAgent::Droid(_) | CodingAgent::KimiCode(_) => Passthrough,
+             CodingAgent::QwenCode(_) | CodingAgent::Gemini(_) => Gemini,
+             CodingAgent::CursorAgent(_) => Cursor,
+             CodingAgent::Codex(_) => Codex,
+diff --git a/crates/local-deployment/src/container.rs b/crates/local-deployment/src/container.rs
+index 47d87152e..5e94804b1 100644
+--- a/crates/local-deployment/src/container.rs
++++ b/crates/local-deployment/src/container.rs
+@@ -1335,6 +1335,7 @@ impl ContainerService for LocalContainerService {
+                     | BaseCodingAgent::ClaudeCode
+                     | BaseCodingAgent::Gemini
+                     | BaseCodingAgent::QwenCode
++                    | BaseCodingAgent::KimiCode
+                     | BaseCodingAgent::Opencode,
+                 ) => ExecutorApprovalBridge::new(
+                     self.approvals.clone(),
+diff --git a/crates/server/src/bin/generate_types.rs b/crates/server/src/bin/generate_types.rs
+index eb807cae5..160d367a2 100644
+--- a/crates/server/src/bin/generate_types.rs
++++ b/crates/server/src/bin/generate_types.rs
+@@ -343,6 +343,10 @@ fn generate_schemas() -> Result<HashMap<&'static str, String>, serde_json::Error
+             "qwen_code",
+             generate_json_schema::<executors::executors::qwen::QwenCode>()?,
+         ),
++        (
++            "kimi_code",
++            generate_json_schema::<executors::executors::kimi::KimiCode>()?,
++        ),
+         (
+             "copilot",
+             generate_json_schema::<executors::executors::copilot::Copilot>()?,
+diff --git a/packages/public/agents/kimi-dark.svg b/packages/public/agents/kimi-dark.svg
+new file mode 100644
+index 000000000..ec29abf58
+--- /dev/null
++++ b/packages/public/agents/kimi-dark.svg
+@@ -0,0 +1,3 @@
++<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
++<path d="M4 3H6V6.5L9 3H11.5L7.5 7.5L12 13H9.5L6 8.5V13H4V3Z" fill="#A78BFA"/>
++</svg>
+diff --git a/packages/public/agents/kimi-light.svg b/packages/public/agents/kimi-light.svg
+new file mode 100644
+index 000000000..7f8d81e22
+--- /dev/null
++++ b/packages/public/agents/kimi-light.svg
+@@ -0,0 +1,3 @@
++<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
++<path d="M4 3H6V6.5L9 3H11.5L7.5 7.5L12 13H9.5L6 8.5V13H4V3Z" fill="#4A3B6B"/>
++</svg>
+diff --git a/packages/web-core/src/shared/components/AgentIcon.tsx b/packages/web-core/src/shared/components/AgentIcon.tsx
+index 9ba54e64c..237bb3cbb 100644
+--- a/packages/web-core/src/shared/components/AgentIcon.tsx
++++ b/packages/web-core/src/shared/components/AgentIcon.tsx
+@@ -25,6 +25,8 @@ export function getAgentName(
+       return 'Cursor';
+     case BaseCodingAgent.QWEN_CODE:
+       return 'Qwen';
++    case BaseCodingAgent.KIMI_CODE:
++      return 'Kimi';
+     case BaseCodingAgent.COPILOT:
+       return 'Copilot';
+     case BaseCodingAgent.DROID:
+@@ -67,6 +69,9 @@ export function AgentIcon({ agent, className = 'h-4 w-4' }: AgentIconProps) {
+     case BaseCodingAgent.QWEN_CODE:
+       iconPath = `/agents/qwen${suffix}.svg`;
+       break;
++    case BaseCodingAgent.KIMI_CODE:
++      iconPath = `/agents/kimi${suffix}.svg`;
++      break;
+     case BaseCodingAgent.COPILOT:
+       iconPath = `/agents/copilot${suffix}.svg`;
+       break;
+diff --git a/shared/schemas/kimi_code.json b/shared/schemas/kimi_code.json
+new file mode 100644
+index 000000000..6a40a6c5f
+--- /dev/null
++++ b/shared/schemas/kimi_code.json
+@@ -0,0 +1,58 @@
++{
++  "$schema": "http://json-schema.org/draft-07/schema#",
++  "properties": {
++    "append_prompt": {
++      "title": "Append Prompt",
++      "description": "Extra text appended to the prompt",
++      "type": [
++        "string",
++        "null"
++      ],
++      "format": "textarea",
++      "default": null
++    },
++    "model": {
++      "type": [
++        "string",
++        "null"
++      ]
++    },
++    "yolo": {
++      "type": [
++        "boolean",
++        "null"
++      ]
++    },
++    "base_command_override": {
++      "title": "Base Command Override",
++      "description": "Override the base command with a custom command",
++      "type": [
++        "string",
++        "null"
++      ]
++    },
++    "additional_params": {
++      "title": "Additional Parameters",
++      "description": "Additional parameters to append to the base command",
++      "type": [
++        "array",
++        "null"
++      ],
++      "items": {
++        "type": "string"
++      }
++    },
++    "env": {
++      "title": "Environment Variables",
++      "description": "Environment variables to set when running the executor",
++      "type": [
++        "object",
++        "null"
++      ],
++      "additionalProperties": {
++        "type": "string"
++      }
++    }
++  },
++  "type": "object"
++}
+\ No newline at end of file
+diff --git a/shared/types.ts b/shared/types.ts
+index 4032b8caf..2cca18482 100644
+--- a/shared/types.ts
++++ b/shared/types.ts
+@@ -573,9 +573,9 @@ working_dir: string | null, };
+ 
+ export type ScriptRequestLanguage = "Bash";
+ 
+-export enum BaseCodingAgent { CLAUDE_CODE = "CLAUDE_CODE", AMP = "AMP", GEMINI = "GEMINI", CODEX = "CODEX", OPENCODE = "OPENCODE", CURSOR_AGENT = "CURSOR_AGENT", QWEN_CODE = "QWEN_CODE", COPILOT = "COPILOT", DROID = "DROID" }
++export enum BaseCodingAgent { CLAUDE_CODE = "CLAUDE_CODE", AMP = "AMP", GEMINI = "GEMINI", CODEX = "CODEX", OPENCODE = "OPENCODE", CURSOR_AGENT = "CURSOR_AGENT", QWEN_CODE = "QWEN_CODE", KIMI_CODE = "KIMI_CODE", COPILOT = "COPILOT", DROID = "DROID" }
+ 
+-export type CodingAgent = { "CLAUDE_CODE": ClaudeCode } | { "AMP": Amp } | { "GEMINI": Gemini } | { "CODEX": Codex } | { "OPENCODE": Opencode } | { "CURSOR_AGENT": CursorAgent } | { "QWEN_CODE": QwenCode } | { "COPILOT": Copilot } | { "DROID": Droid };
++export type CodingAgent = { "CLAUDE_CODE": ClaudeCode } | { "AMP": Amp } | { "GEMINI": Gemini } | { "CODEX": Codex } | { "OPENCODE": Opencode } | { "CURSOR_AGENT": CursorAgent } | { "QWEN_CODE": QwenCode } | { "KIMI_CODE": KimiCode } | { "COPILOT": Copilot } | { "DROID": Droid };
+ 
+ export type SlashCommandDescription = { 
+ /**
+@@ -615,7 +615,7 @@ models?: Array<string>,
+  */
+ reasoning_by_model?: { [key in string]?: string }, };
+ 
+-export type ExecutorProfile = { recently_used_models?: ExecutorRecentModels | null, } & ({ [key in string]?: { "CLAUDE_CODE": ClaudeCode } | { "AMP": Amp } | { "GEMINI": Gemini } | { "CODEX": Codex } | { "OPENCODE": Opencode } | { "CURSOR_AGENT": CursorAgent } | { "QWEN_CODE": QwenCode } | { "COPILOT": Copilot } | { "DROID": Droid } });
++export type ExecutorProfile = { recently_used_models?: ExecutorRecentModels | null, } & ({ [key in string]?: { "CLAUDE_CODE": ClaudeCode } | { "AMP": Amp } | { "GEMINI": Gemini } | { "CODEX": Codex } | { "OPENCODE": Opencode } | { "CURSOR_AGENT": CursorAgent } | { "QWEN_CODE": QwenCode } | { "KIMI_CODE": KimiCode } | { "COPILOT": Copilot } | { "DROID": Droid } });
+ 
+ export type ExecutorConfigs = { executors: { [key in BaseCodingAgent]?: ExecutorProfile }, };
+ 
+-- 
+2.50.1 (Apple Git-155)
+
