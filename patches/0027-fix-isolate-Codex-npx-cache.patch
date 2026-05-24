@@ -1,0 +1,84 @@
+From 7017d464b73fb1ada2b3d689f00fac9711111b99 Mon Sep 17 00:00:00 2001
+From: Riajul Islam <kmriajulislami@gmail.com>
+Date: Sun, 24 May 2026 19:47:21 +0600
+Subject: [PATCH] fix: isolate Codex npx cache
+
+---
+ crates/executors/src/executors/codex.rs | 38 +++++++++++++++++++++++--
+ 1 file changed, 35 insertions(+), 3 deletions(-)
+
+diff --git a/crates/executors/src/executors/codex.rs b/crates/executors/src/executors/codex.rs
+index df2c336b2..0b61ff658 100644
+--- a/crates/executors/src/executors/codex.rs
++++ b/crates/executors/src/executors/codex.rs
+@@ -4,8 +4,9 @@ pub mod normalize_logs;
+ pub mod review;
+ pub mod slash_commands;
+ use std::{
+-    collections::HashMap,
+-    env,
++    collections::{HashMap, hash_map::DefaultHasher},
++    env, fs,
++    hash::{Hash, Hasher},
+     path::{Path, PathBuf},
+     str::FromStr,
+     sync::Arc,
+@@ -24,6 +25,17 @@ pub fn codex_home() -> Option<PathBuf> {
+     dirs::home_dir().map(|home| home.join(".codex"))
+ }
+
++const CODEX_NPX_CACHE_VERSION: &str = "codex-0.133.0";
++
++fn codex_npx_cache_dir(current_dir: &Path) -> PathBuf {
++    let mut hasher = DefaultHasher::new();
++    current_dir.hash(&mut hasher);
++    env::temp_dir()
++        .join("vibe-kanban-npx")
++        .join(CODEX_NPX_CACHE_VERSION)
++        .join(format!("{:016x}", hasher.finish()))
++}
++
+ pub(crate) fn resolve_model(model: Option<&str>) -> (Option<&str>, bool) {
+     match model.and_then(|m| m.strip_suffix("-fast")) {
+         Some(base) => (Some(base), true),
+@@ -667,6 +679,14 @@ impl Codex {
+             .with_profile(&self.cmd)
+             .apply_to_command(&mut process);
+
++        if self.cmd.base_command_override.is_none() {
++            let npx_cache_dir = codex_npx_cache_dir(current_dir);
++            fs::create_dir_all(&npx_cache_dir).map_err(ExecutorError::Io)?;
++            process
++                .env("npm_config_cache", &npx_cache_dir)
++                .env("NPM_CONFIG_CACHE", &npx_cache_dir);
++        }
++
+         let mut child = process.group_spawn_no_window()?;
+
+         let child_stdout = child.inner().stdout.take().ok_or_else(|| {
+@@ -763,7 +783,9 @@ impl Codex {
+
+ #[cfg(test)]
+ mod tests {
+-    use super::resolve_model;
++    use std::path::Path;
++
++    use super::{CODEX_NPX_CACHE_VERSION, codex_npx_cache_dir, resolve_model};
+
+     #[test]
+     fn resolve_model_detects_fast_suffix() {
+@@ -780,4 +802,14 @@ mod tests {
+         );
+         assert_eq!(resolve_model(None), (None, false));
+     }
++
++    #[test]
++    fn codex_npx_cache_is_scoped_by_working_directory() {
++        let first = codex_npx_cache_dir(Path::new("/workspaces/first"));
++        let second = codex_npx_cache_dir(Path::new("/workspaces/second"));
++
++        assert_ne!(first, second);
++        assert!(first.starts_with(std::env::temp_dir().join("vibe-kanban-npx")));
++        assert!(first.to_string_lossy().contains(CODEX_NPX_CACHE_VERSION));
++    }
+ }
