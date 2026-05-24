@@ -52,20 +52,20 @@ data:
     # Install Claude Code via official installer
     if [ ! -f "$HOME/.local/bin/claude" ]; then
       echo "Installing Claude Code..."
-      curl -fsSL https://claude.ai/install.sh | bash 2>&1 || true
+      curl -fsSL https://claude.ai/install.sh | bash -s stable 2>&1 || true
     fi
 
     # Install Codex via npm
     if ! command -v codex &>/dev/null; then
       echo "Installing Codex..."
-      npm install -g @openai/codex 2>&1 || true
+      npm install -g @openai/codex@0.133.0 2>&1 || true
     fi
 
     # Install OpenCode when ZAI_API_KEY is provided
     if [ -n "${ZAI_API_KEY:-}" ]; then
       echo "ZAI_API_KEY detected, installing OpenCode..."
       if ! command -v opencode &>/dev/null; then
-        curl -fsSL https://raw.githubusercontent.com/opencode-ai/opencode/main/install.sh | bash 2>&1 || true
+        curl -fsSL https://opencode.ai/install | bash -s -- --version 1.15.10 2>&1 || true
       fi
 
       # Configure OpenCode auth for zai-coding-plan provider

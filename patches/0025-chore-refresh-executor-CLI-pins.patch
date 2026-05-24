@@ -1,0 +1,653 @@
+From ceaa0ecad7d93a91cfcdc8cf1e6fc423941834aa Mon Sep 17 00:00:00 2001
+From: Riajul Islam <kmriajulislami@gmail.com>
+Date: Sun, 24 May 2026 16:01:57 +0600
+Subject: [PATCH] chore: refresh executor CLI pins
+
+---
+ Cargo.lock                                    | 105 +++++++++---------
+ crates/executors/Cargo.toml                   |   4 +-
+ crates/executors/src/executors/claude.rs      |   4 +-
+ crates/executors/src/executors/codex.rs       |   4 +-
+ .../executors/src/executors/codex/client.rs   |  19 +++-
+ .../src/executors/codex/normalize_logs.rs     |  43 +++----
+ .../src/executors/codex/slash_commands.rs     |   6 +-
+ crates/executors/src/executors/copilot.rs     |   2 +-
+ crates/executors/src/executors/gemini.rs      |   2 +-
+ crates/executors/src/executors/opencode.rs    |   2 +-
+ crates/executors/src/executors/qwen.rs        |   2 +-
+ 11 files changed, 97 insertions(+), 96 deletions(-)
+
+diff --git a/Cargo.lock b/Cargo.lock
+index a4c3bb805..67b423fbc 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -214,7 +214,7 @@ version = "1.1.5"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
+ dependencies = [
+- "windows-sys 0.60.2",
++ "windows-sys 0.61.2",
+ ]
+
+ [[package]]
+@@ -225,7 +225,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
+ dependencies = [
+  "anstyle",
+  "once_cell_polyfill",
+- "windows-sys 0.60.2",
++ "windows-sys 0.61.2",
+ ]
+
+ [[package]]
+@@ -1257,8 +1257,8 @@ checksum = "e9b18233253483ce2f65329a24072ec414db782531bdbb7d0bbc4bd2ce6b7e21"
+
+ [[package]]
+ name = "codex-app-server-protocol"
+-version = "0.124.0"
+-source = "git+https://github.com/openai/codex.git?tag=rust-v0.124.0#e9fb49366c93a1478ec71cc41ecee415a197d036"
++version = "0.133.0"
++source = "git+https://github.com/openai/codex.git?tag=rust-v0.133.0#9474e5cfc4494b0ba319352aa86ce436c59e65c8"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -1281,8 +1281,8 @@ dependencies = [
+
+ [[package]]
+ name = "codex-async-utils"
+-version = "0.124.0"
+-source = "git+https://github.com/openai/codex.git?tag=rust-v0.124.0#e9fb49366c93a1478ec71cc41ecee415a197d036"
++version = "0.133.0"
++source = "git+https://github.com/openai/codex.git?tag=rust-v0.133.0#9474e5cfc4494b0ba319352aa86ce436c59e65c8"
+ dependencies = [
+  "async-trait",
+  "tokio",
+@@ -1291,8 +1291,8 @@ dependencies = [
+
+ [[package]]
+ name = "codex-execpolicy"
+-version = "0.124.0"
+-source = "git+https://github.com/openai/codex.git?tag=rust-v0.124.0#e9fb49366c93a1478ec71cc41ecee415a197d036"
++version = "0.133.0"
++source = "git+https://github.com/openai/codex.git?tag=rust-v0.133.0#9474e5cfc4494b0ba319352aa86ce436c59e65c8"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -1307,8 +1307,8 @@ dependencies = [
+
+ [[package]]
+ name = "codex-experimental-api-macros"
+-version = "0.124.0"
+-source = "git+https://github.com/openai/codex.git?tag=rust-v0.124.0#e9fb49366c93a1478ec71cc41ecee415a197d036"
++version = "0.133.0"
++source = "git+https://github.com/openai/codex.git?tag=rust-v0.133.0#9474e5cfc4494b0ba319352aa86ce436c59e65c8"
+ dependencies = [
+  "proc-macro2",
+  "quote",
+@@ -1317,8 +1317,8 @@ dependencies = [
+
+ [[package]]
+ name = "codex-network-proxy"
+-version = "0.124.0"
+-source = "git+https://github.com/openai/codex.git?tag=rust-v0.124.0#e9fb49366c93a1478ec71cc41ecee415a197d036"
++version = "0.133.0"
++source = "git+https://github.com/openai/codex.git?tag=rust-v0.133.0#9474e5cfc4494b0ba319352aa86ce436c59e65c8"
+ dependencies = [
+  "anyhow",
+  "async-trait",
+@@ -1347,8 +1347,8 @@ dependencies = [
+
+ [[package]]
+ name = "codex-protocol"
+-version = "0.124.0"
+-source = "git+https://github.com/openai/codex.git?tag=rust-v0.124.0#e9fb49366c93a1478ec71cc41ecee415a197d036"
++version = "0.133.0"
++source = "git+https://github.com/openai/codex.git?tag=rust-v0.133.0#9474e5cfc4494b0ba319352aa86ce436c59e65c8"
+ dependencies = [
+  "chardetng",
+  "chrono",
+@@ -1358,7 +1358,6 @@ dependencies = [
+  "codex-utils-absolute-path",
+  "codex-utils-image",
+  "codex-utils-string",
+- "codex-utils-template",
+  "encoding_rs",
+  "globset",
+  "icu_decimal",
+@@ -1380,12 +1379,13 @@ dependencies = [
+  "tracing",
+  "ts-rs 11.1.0",
+  "uuid",
++ "wildmatch",
+ ]
+
+ [[package]]
+ name = "codex-shell-command"
+-version = "0.124.0"
+-source = "git+https://github.com/openai/codex.git?tag=rust-v0.124.0#e9fb49366c93a1478ec71cc41ecee415a197d036"
++version = "0.133.0"
++source = "git+https://github.com/openai/codex.git?tag=rust-v0.133.0#9474e5cfc4494b0ba319352aa86ce436c59e65c8"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-protocol",
+@@ -1403,8 +1403,8 @@ dependencies = [
+
+ [[package]]
+ name = "codex-utils-absolute-path"
+-version = "0.124.0"
+-source = "git+https://github.com/openai/codex.git?tag=rust-v0.124.0#e9fb49366c93a1478ec71cc41ecee415a197d036"
++version = "0.133.0"
++source = "git+https://github.com/openai/codex.git?tag=rust-v0.133.0#9474e5cfc4494b0ba319352aa86ce436c59e65c8"
+ dependencies = [
+  "dirs 6.0.0",
+  "dunce",
+@@ -1415,8 +1415,8 @@ dependencies = [
+
+ [[package]]
+ name = "codex-utils-cache"
+-version = "0.124.0"
+-source = "git+https://github.com/openai/codex.git?tag=rust-v0.124.0#e9fb49366c93a1478ec71cc41ecee415a197d036"
++version = "0.133.0"
++source = "git+https://github.com/openai/codex.git?tag=rust-v0.133.0#9474e5cfc4494b0ba319352aa86ce436c59e65c8"
+ dependencies = [
+  "lru 0.16.3",
+  "sha1",
+@@ -1425,8 +1425,8 @@ dependencies = [
+
+ [[package]]
+ name = "codex-utils-home-dir"
+-version = "0.124.0"
+-source = "git+https://github.com/openai/codex.git?tag=rust-v0.124.0#e9fb49366c93a1478ec71cc41ecee415a197d036"
++version = "0.133.0"
++source = "git+https://github.com/openai/codex.git?tag=rust-v0.133.0#9474e5cfc4494b0ba319352aa86ce436c59e65c8"
+ dependencies = [
+  "codex-utils-absolute-path",
+  "dirs 6.0.0",
+@@ -1434,8 +1434,8 @@ dependencies = [
+
+ [[package]]
+ name = "codex-utils-image"
+-version = "0.124.0"
+-source = "git+https://github.com/openai/codex.git?tag=rust-v0.124.0#e9fb49366c93a1478ec71cc41ecee415a197d036"
++version = "0.133.0"
++source = "git+https://github.com/openai/codex.git?tag=rust-v0.133.0#9474e5cfc4494b0ba319352aa86ce436c59e65c8"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-utils-cache",
+@@ -1447,25 +1447,22 @@ dependencies = [
+
+ [[package]]
+ name = "codex-utils-rustls-provider"
+-version = "0.124.0"
+-source = "git+https://github.com/openai/codex.git?tag=rust-v0.124.0#e9fb49366c93a1478ec71cc41ecee415a197d036"
++version = "0.133.0"
++source = "git+https://github.com/openai/codex.git?tag=rust-v0.133.0#9474e5cfc4494b0ba319352aa86ce436c59e65c8"
+ dependencies = [
+  "rustls",
+ ]
+
+ [[package]]
+ name = "codex-utils-string"
+-version = "0.124.0"
+-source = "git+https://github.com/openai/codex.git?tag=rust-v0.124.0#e9fb49366c93a1478ec71cc41ecee415a197d036"
++version = "0.133.0"
++source = "git+https://github.com/openai/codex.git?tag=rust-v0.133.0#9474e5cfc4494b0ba319352aa86ce436c59e65c8"
+ dependencies = [
+  "regex-lite",
++ "serde",
++ "serde_json",
+ ]
+
+-[[package]]
+-name = "codex-utils-template"
+-version = "0.124.0"
+-source = "git+https://github.com/openai/codex.git?tag=rust-v0.124.0#e9fb49366c93a1478ec71cc41ecee415a197d036"
+-
+ [[package]]
+ name = "color_quant"
+ version = "1.1.0"
+@@ -2346,7 +2343,7 @@ dependencies = [
+  "libc",
+  "option-ext",
+  "redox_users 0.5.2",
+- "windows-sys 0.60.2",
++ "windows-sys 0.61.2",
+ ]
+
+ [[package]]
+@@ -2739,7 +2736,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
+ dependencies = [
+  "libc",
+- "windows-sys 0.60.2",
++ "windows-sys 0.61.2",
+ ]
+
+ [[package]]
+@@ -3375,8 +3372,8 @@ dependencies = [
+  "libc",
+  "log",
+  "rustversion",
+- "windows-link 0.1.3",
+- "windows-result 0.3.4",
++ "windows-link 0.2.1",
++ "windows-result 0.4.1",
+ ]
+
+ [[package]]
+@@ -4074,7 +4071,7 @@ dependencies = [
+  "libc",
+  "percent-encoding",
+  "pin-project-lite",
+- "socket2 0.5.10",
++ "socket2 0.6.3",
+  "system-configuration",
+  "tokio",
+  "tower-service",
+@@ -4094,7 +4091,7 @@ dependencies = [
+  "js-sys",
+  "log",
+  "wasm-bindgen",
+- "windows-core 0.58.0",
++ "windows-core 0.61.2",
+ ]
+
+ [[package]]
+@@ -4485,7 +4482,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
+ dependencies = [
+  "hermit-abi",
+  "libc",
+- "windows-sys 0.60.2",
++ "windows-sys 0.61.2",
+ ]
+
+ [[package]]
+@@ -5608,7 +5605,7 @@ version = "0.50.3"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
+ dependencies = [
+- "windows-sys 0.60.2",
++ "windows-sys 0.61.2",
+ ]
+
+ [[package]]
+@@ -5700,7 +5697,7 @@ version = "0.7.6"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8"
+ dependencies = [
+- "proc-macro-crate 3.5.0",
++ "proc-macro-crate 1.3.1",
+  "proc-macro2",
+  "quote",
+  "syn 2.0.117",
+@@ -6854,7 +6851,7 @@ dependencies = [
+  "quinn-udp",
+  "rustc-hash 2.1.2",
+  "rustls",
+- "socket2 0.5.10",
++ "socket2 0.6.3",
+  "thiserror 2.0.18",
+  "tokio",
+  "tracing",
+@@ -6892,7 +6889,7 @@ dependencies = [
+  "cfg_aliases 0.2.1",
+  "libc",
+  "once_cell",
+- "socket2 0.5.10",
++ "socket2 0.6.3",
+  "tracing",
+  "windows-sys 0.60.2",
+ ]
+@@ -8149,7 +8146,7 @@ dependencies = [
+  "errno",
+  "libc",
+  "linux-raw-sys",
+- "windows-sys 0.60.2",
++ "windows-sys 0.61.2",
+ ]
+
+ [[package]]
+@@ -8208,7 +8205,7 @@ dependencies = [
+  "security-framework",
+  "security-framework-sys",
+  "webpki-root-certs",
+- "windows-sys 0.60.2",
++ "windows-sys 0.61.2",
+ ]
+
+ [[package]]
+@@ -9211,7 +9208,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
+ dependencies = [
+  "libc",
+- "windows-sys 0.60.2",
++ "windows-sys 0.61.2",
+ ]
+
+ [[package]]
+@@ -10326,7 +10323,7 @@ dependencies = [
+  "getrandom 0.4.2",
+  "once_cell",
+  "rustix",
+- "windows-sys 0.60.2",
++ "windows-sys 0.61.2",
+ ]
+
+ [[package]]
+@@ -11115,7 +11112,7 @@ checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
+ dependencies = [
+  "memoffset 0.9.1",
+  "tempfile",
+- "windows-sys 0.60.2",
++ "windows-sys 0.61.2",
+ ]
+
+ [[package]]
+@@ -12003,6 +12000,12 @@ dependencies = [
+  "thiserror 2.0.18",
+ ]
+
++[[package]]
++name = "wildmatch"
++version = "2.6.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "29333c3ea1ba8b17211763463ff24ee84e41c78224c16b001cd907e663a38c68"
++
+ [[package]]
+ name = "winapi"
+ version = "0.3.9"
+@@ -12025,7 +12028,7 @@ version = "0.1.11"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
+ dependencies = [
+- "windows-sys 0.48.0",
++ "windows-sys 0.61.2",
+ ]
+
+ [[package]]
+diff --git a/crates/executors/Cargo.toml b/crates/executors/Cargo.toml
+index cc70c6f92..59ef35378 100644
+--- a/crates/executors/Cargo.toml
++++ b/crates/executors/Cargo.toml
+@@ -36,8 +36,8 @@ convert_case = "0.6"
+ sqlx = "0.8.6"
+ shlex = "1.3.0"
+ agent-client-protocol = { version = "0.8", features = ["unstable"] }
+-codex-protocol = { git = "https://github.com/openai/codex.git", package = "codex-protocol", tag = "rust-v0.124.0" }
+-codex-app-server-protocol = { git = "https://github.com/openai/codex.git", package = "codex-app-server-protocol", tag = "rust-v0.124.0" }
++codex-protocol = { git = "https://github.com/openai/codex.git", package = "codex-protocol", tag = "rust-v0.133.0" }
++codex-app-server-protocol = { git = "https://github.com/openai/codex.git", package = "codex-app-server-protocol", tag = "rust-v0.133.0" }
+ sha2 = "0.10"
+ derivative = "2.2.0"
+ reqwest = { workspace = true }
+diff --git a/crates/executors/src/executors/claude.rs b/crates/executors/src/executors/claude.rs
+index 4eb401338..873037781 100644
+--- a/crates/executors/src/executors/claude.rs
++++ b/crates/executors/src/executors/claude.rs
+@@ -60,9 +60,9 @@ const SUPPRESSED_STDERR_PATTERNS: &[&str] = &["[WARN] Fast mode requires the nat
+
+ fn base_command(claude_code_router: bool) -> &'static str {
+     if claude_code_router {
+-        "npx -y @musistudio/claude-code-router@1.0.66 code"
++        "npx -y @musistudio/claude-code-router@2.0.0 code"
+     } else {
+-        "npx -y @anthropic-ai/claude-code@2.1.119"
++        "npx -y @anthropic-ai/claude-code@2.1.142"
+     }
+ }
+
+diff --git a/crates/executors/src/executors/codex.rs b/crates/executors/src/executors/codex.rs
+index db8c5ea7c..df2c336b2 100644
+--- a/crates/executors/src/executors/codex.rs
++++ b/crates/executors/src/executors/codex.rs
+@@ -445,7 +445,7 @@ impl StandardCodingAgentExecutor for Codex {
+
+ impl Codex {
+     pub fn base_command() -> &'static str {
+-        "npx -y @openai/codex@0.124.0"
++        "npx -y @openai/codex@0.133.0"
+     }
+
+     fn build_command_builder(&self) -> Result<CommandBuilder, CommandBuildError> {
+@@ -509,7 +509,7 @@ impl Codex {
+
+         let (model, is_fast) = resolve_model(self.model.as_deref());
+         let service_tier = if is_fast {
+-            Some(Some(ServiceTier::Fast))
++            Some(Some(ServiceTier::Fast.request_value().to_string()))
+         } else {
+             None
+         };
+diff --git a/crates/executors/src/executors/codex/client.rs b/crates/executors/src/executors/codex/client.rs
+index 4939b77c9..d03554356 100644
+--- a/crates/executors/src/executors/codex/client.rs
++++ b/crates/executors/src/executors/codex/client.rs
+@@ -15,9 +15,9 @@ use codex_app_server_protocol::{
+     DynamicToolCallResponse, FileChangeApprovalDecision, FileChangeRequestApprovalResponse,
+     GetAccountParams, GetAccountRateLimitsResponse, GetAccountResponse, InitializeCapabilities,
+     InitializeParams, InitializeResponse, ItemCompletedNotification, JSONRPCError,
+-    JSONRPCNotification, JSONRPCRequest, JSONRPCResponse, ListMcpServerStatusParams,
+-    ListMcpServerStatusResponse, McpServerStatusDetail, RequestId, ReviewStartParams,
+-    ReviewStartResponse, ReviewTarget, ServerRequest, ThreadCompactStartParams,
++    JSONRPCErrorError, JSONRPCNotification, JSONRPCRequest, JSONRPCResponse,
++    ListMcpServerStatusParams, ListMcpServerStatusResponse, McpServerStatusDetail, RequestId,
++    ReviewStartParams, ReviewStartResponse, ReviewTarget, ServerRequest, ThreadCompactStartParams,
+     ThreadCompactStartResponse, ThreadForkParams, ThreadForkResponse, ThreadItem, ThreadReadParams,
+     ThreadReadResponse, ThreadStartParams, ThreadStartResponse, ToolRequestUserInputAnswer,
+     ToolRequestUserInputQuestion, ToolRequestUserInputResponse, TurnCompletedNotification,
+@@ -439,6 +439,19 @@ impl AppServerClient {
+                 };
+                 peer.send(&response).await
+             }
++            ServerRequest::AttestationGenerate { request_id, .. } => {
++                tracing::warn!("received unsupported attestation request");
++                let response = JSONRPCError {
++                    id: request_id,
++                    error: JSONRPCErrorError {
++                        code: -32000,
++                        message: "attestation generation is not supported by this client"
++                            .to_string(),
++                        data: None,
++                    },
++                };
++                peer.send(&response).await
++            }
+             ServerRequest::ApplyPatchApproval { .. }
+             | ServerRequest::ExecCommandApproval { .. } => {
+                 tracing::error!(
+diff --git a/crates/executors/src/executors/codex/normalize_logs.rs b/crates/executors/src/executors/codex/normalize_logs.rs
+index 7a83529de..6802c1be6 100644
+--- a/crates/executors/src/executors/codex/normalize_logs.rs
++++ b/crates/executors/src/executors/codex/normalize_logs.rs
+@@ -22,14 +22,15 @@ use codex_protocol::{
+     openai_models::ReasoningEffort,
+     plan_tool::{StepStatus, UpdatePlanArgs},
+     protocol::{
+-        AgentMessageDeltaEvent, AgentMessageEvent, AgentReasoningDeltaEvent, AgentReasoningEvent,
+-        AgentReasoningSectionBreakEvent, ApplyPatchApprovalRequestEvent, BackgroundEventEvent,
+-        ErrorEvent, EventMsg, ExecApprovalRequestEvent, ExecCommandBeginEvent, ExecCommandEndEvent,
++        AgentMessageContentDeltaEvent, AgentMessageEvent, AgentReasoningEvent,
++        AgentReasoningSectionBreakEvent, ApplyPatchApprovalRequestEvent, ErrorEvent, EventMsg,
++        ExecApprovalRequestEvent, ExecCommandBeginEvent, ExecCommandEndEvent,
+         ExecCommandOutputDeltaEvent, ExecOutputStream, ExitedReviewModeEvent,
+         FileChange as CodexProtoFileChange, ItemCompletedEvent, ItemStartedEvent, McpInvocation,
+         McpToolCallBeginEvent, McpToolCallEndEvent, ModelRerouteEvent, PatchApplyBeginEvent,
+-        PatchApplyEndEvent, PlanDeltaEvent, RequestUserInputEvent, StreamErrorEvent,
+-        ViewImageToolCallEvent, WarningEvent, WebSearchBeginEvent, WebSearchEndEvent,
++        PatchApplyEndEvent, PlanDeltaEvent, ReasoningContentDeltaEvent, RequestUserInputEvent,
++        StreamErrorEvent, ViewImageToolCallEvent, WarningEvent, WebSearchBeginEvent,
++        WebSearchEndEvent,
+     },
+ };
+ use futures::StreamExt;
+@@ -1608,12 +1609,14 @@ pub fn normalize_logs(
+                         &mut state.model_params,
+                     );
+                 }
+-                EventMsg::AgentMessageDelta(AgentMessageDeltaEvent { delta }) => {
++                EventMsg::AgentMessageContentDelta(AgentMessageContentDeltaEvent {
++                    delta, ..
++                }) => {
+                     state.thinking = None;
+                     let (entry, index, is_new) = state.assistant_message_append(delta);
+                     upsert_normalized_entry(&msg_store, index, entry, is_new);
+                 }
+-                EventMsg::AgentReasoningDelta(AgentReasoningDeltaEvent { delta }) => {
++                EventMsg::ReasoningContentDelta(ReasoningContentDeltaEvent { delta, .. }) => {
+                     state.assistant = None;
+                     let (entry, index, is_new) = state.thinking_append(delta);
+                     upsert_normalized_entry(&msg_store, index, entry, is_new);
+@@ -1686,6 +1689,7 @@ pub fn normalize_logs(
+                     changes,
+                     reason: _,
+                     grant_root: _,
++                    started_at_ms: _,
+                 }) => {
+                     state.assistant = None;
+                     state.thinking = None;
+@@ -1755,6 +1759,7 @@ pub fn normalize_logs(
+                     source: _,
+                     interaction_input: _,
+                     process_id: _,
++                    started_at_ms: _,
+                 }) => {
+                     state.assistant = None;
+                     state.thinking = None;
+@@ -1846,18 +1851,6 @@ pub fn normalize_logs(
+                         );
+                     }
+                 }
+-                EventMsg::BackgroundEvent(BackgroundEventEvent { message }) => {
+-                    add_normalized_entry(
+-                        &msg_store,
+-                        &entry_index,
+-                        NormalizedEntry {
+-                            timestamp: None,
+-                            entry_type: NormalizedEntryType::SystemMessage,
+-                            content: format!("Background event: {message}"),
+-                            metadata: None,
+-                        },
+-                    );
+-                }
+                 EventMsg::StreamError(StreamErrorEvent {
+                     message,
+                     codex_error_info,
+@@ -2377,26 +2370,19 @@ pub fn normalize_logs(
+                     }
+                 }
+                 EventMsg::AgentReasoningRawContent(..)
+-                | EventMsg::AgentReasoningRawContentDelta(..)
+                 | EventMsg::ThreadRolledBack(..)
++                | EventMsg::ThreadSettingsApplied(..)
++                | EventMsg::ThreadGoalUpdated(..)
+                 | EventMsg::TurnStarted(..)
+                 | EventMsg::UserMessage(..)
+                 | EventMsg::TurnDiff(..)
+-                | EventMsg::GetHistoryEntryResponse(..)
+-                | EventMsg::McpListToolsResponse(..)
+                 | EventMsg::McpStartupComplete(..)
+                 | EventMsg::McpStartupUpdate(..)
+                 | EventMsg::DeprecationNotice(..)
+-                | EventMsg::UndoCompleted(..)
+-                | EventMsg::UndoStarted(..)
+                 | EventMsg::RawResponseItem(..)
+                 | EventMsg::ItemStarted(..)
+                 | EventMsg::ItemCompleted(..)
+-                | EventMsg::AgentMessageContentDelta(..)
+-                | EventMsg::ReasoningContentDelta(..)
+                 | EventMsg::ReasoningRawContentDelta(..)
+-                | EventMsg::ListSkillsResponse(..)
+-                | EventMsg::SkillsUpdateAvailable
+                 | EventMsg::TurnAborted(..)
+                 | EventMsg::ShutdownComplete
+                 | EventMsg::TerminalInteraction(..)
+@@ -2412,7 +2398,6 @@ pub fn normalize_logs(
+                 | EventMsg::CollabCloseEnd(..)
+                 | EventMsg::CollabResumeBegin(..)
+                 | EventMsg::CollabResumeEnd(..)
+-                | EventMsg::ThreadNameUpdated(..)
+                 | EventMsg::RealtimeConversationStarted(..)
+                 | EventMsg::RealtimeConversationSdp(..)
+                 | EventMsg::RealtimeConversationRealtime(..)
+diff --git a/crates/executors/src/executors/codex/slash_commands.rs b/crates/executors/src/executors/codex/slash_commands.rs
+index 04e263d85..08f2a1a49 100644
+--- a/crates/executors/src/executors/codex/slash_commands.rs
++++ b/crates/executors/src/executors/codex/slash_commands.rs
+@@ -191,7 +191,7 @@ impl Codex {
+                             .await
+                             .ok()
+                             .and_then(|r| r.config.service_tier)
+-                            .map(|t| matches!(t, ServiceTier::Fast))
++                            .map(|t| ServiceTier::from_request_value(&t) == Some(ServiceTier::Fast))
+                             .unwrap_or(false);
+                         if status {
+                             let message = if current_is_fast || session_fast {
+@@ -225,7 +225,7 @@ impl Codex {
+                         // Fork current session with new tier if one is active
+                         if let Some(old_thread_id) = session_id {
+                             let service_tier = if want_fast {
+-                                Some(Some(ServiceTier::Fast))
++                                Some(Some(ServiceTier::Fast.request_value().to_string()))
+                             } else {
+                                 Some(None)
+                             };
+@@ -401,7 +401,7 @@ async fn fetch_status_message(
+     let global_fast = config_resp
+         .as_ref()
+         .and_then(|r| r.config.service_tier.as_ref())
+-        .map(|t| matches!(t, ServiceTier::Fast))
++        .map(|t| ServiceTier::from_request_value(t) == Some(ServiceTier::Fast))
+         .unwrap_or(false);
+     if global_fast || session_fast {
+         lines.push("- **Service Tier**: `fast ⚡`".to_string());
+diff --git a/crates/executors/src/executors/copilot.rs b/crates/executors/src/executors/copilot.rs
+index 1f33f7c2e..434819462 100644
+--- a/crates/executors/src/executors/copilot.rs
++++ b/crates/executors/src/executors/copilot.rs
+@@ -49,7 +49,7 @@ pub struct Copilot {
+
+ impl Copilot {
+     fn build_command_builder(&self) -> Result<CommandBuilder, CommandBuildError> {
+-        let mut builder = CommandBuilder::new("npx -y @github/copilot@0.0.403");
++        let mut builder = CommandBuilder::new("npx -y @github/copilot@1.0.52");
+
+         if self.allow_all_tools.unwrap_or(false) {
+             builder = builder.extend_params(["--allow-all-tools"]);
+diff --git a/crates/executors/src/executors/gemini.rs b/crates/executors/src/executors/gemini.rs
+index 8d6cb38b3..1e5ccd4ad 100644
+--- a/crates/executors/src/executors/gemini.rs
++++ b/crates/executors/src/executors/gemini.rs
+@@ -46,7 +46,7 @@ pub struct Gemini {
+
+ impl Gemini {
+     fn build_command_builder(&self) -> Result<CommandBuilder, CommandBuildError> {
+-        let mut builder = CommandBuilder::new("npx -y @google/gemini-cli@0.29.3");
++        let mut builder = CommandBuilder::new("npx -y @google/gemini-cli@0.43.0");
+
+         if let Some(model) = &self.model {
+             builder = builder.extend_params(["--model", model.as_str()]);
+diff --git a/crates/executors/src/executors/opencode.rs b/crates/executors/src/executors/opencode.rs
+index 9d33b5824..8293b9b94 100644
+--- a/crates/executors/src/executors/opencode.rs
++++ b/crates/executors/src/executors/opencode.rs
+@@ -89,7 +89,7 @@ type ServerPassword = String;
+
+ impl Opencode {
+     fn build_command_builder(&self) -> Result<CommandBuilder, CommandBuildError> {
+-        let builder = CommandBuilder::new("npx -y opencode-ai@1.4.7")
++        let builder = CommandBuilder::new("npx -y opencode-ai@1.15.10")
+             // Pass hostname/port as separate args so OpenCode treats them as explicitly set
+             // (it checks `process.argv.includes(\"--port\")` / `\"--hostname\"`).
+             .extend_params(["serve", "--hostname", "127.0.0.1", "--port", "0"]);
+diff --git a/crates/executors/src/executors/qwen.rs b/crates/executors/src/executors/qwen.rs
+index 141f30ff5..781b9b070 100644
+--- a/crates/executors/src/executors/qwen.rs
++++ b/crates/executors/src/executors/qwen.rs
+@@ -42,7 +42,7 @@ pub struct QwenCode {
+
+ impl QwenCode {
+     fn build_command_builder(&self) -> Result<CommandBuilder, CommandBuildError> {
+-        let mut builder = CommandBuilder::new("npx -y @qwen-code/qwen-code@0.9.1");
++        let mut builder = CommandBuilder::new("npx -y @qwen-code/qwen-code@0.16.1");
+
+         if let Some(model) = &self.model {
+             builder = builder.extend_params(["--model", model.as_str()]);

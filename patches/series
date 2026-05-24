@@ -23,3 +23,4 @@
 0022-fix-hide-cloud-shutdown-banner.patch
 0023-feat-add-stable-Kimi-Code-executor.patch
 0024-fix-add-Kimi-Code-default-executor-profile.patch
+0025-chore-refresh-executor-CLI-pins.patch

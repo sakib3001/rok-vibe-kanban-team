@@ -28,13 +28,13 @@ In other words, this repo is not claiming that upstream Vibe Kanban is not colla
 
 Current upstream base: `v0.1.44-20260424091429`.
 
-This distribution currently carries 24 downstream patches across 12 main feature and stability areas:
+This distribution currently carries 25 downstream patches across 12 main feature and stability areas:
 
 1. Helm-packaged Remote, Relay, ElectricSQL, and optional browser frontend deployment.
 2. Shared browser-first frontend runtime with code-server and reusable workspace environments.
 3. Workspace auth, browser-scoped sessions, and owner-aware standalone workspace handling.
 4. Zoho OAuth support plus optional allowed-email-domain restrictions.
-5. Kimi Code executor support with resume-safe sessions, configurable CLI args, and context usage reporting.
+5. Kimi Code executor support plus refreshed stable CLI pins for Claude Code, Codex, Gemini, Qwen, Copilot, and OpenCode.
 6. GitLab merge request integration alongside existing GitHub flows.
 7. Markdown preview controls in workspace change review.
 8. Browser notifications for workspace and execution events.
