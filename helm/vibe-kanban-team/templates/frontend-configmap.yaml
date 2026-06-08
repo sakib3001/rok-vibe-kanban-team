@@ -39,6 +39,16 @@ data:
     LOCAL_BIN="/home/coder/.local/bin"
     FULL_PATH="$LOCAL_BIN:$NVM_BIN:$BREW_BIN:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
+    # Cladup drives Claude Code through tmux and a Python shim.
+    AI_RUNTIME_PACKAGES=()
+    command -v tmux >/dev/null 2>&1 || AI_RUNTIME_PACKAGES+=(tmux)
+    command -v python3 >/dev/null 2>&1 || AI_RUNTIME_PACKAGES+=(python3)
+    if [ "${#AI_RUNTIME_PACKAGES[@]}" -gt 0 ]; then
+      echo "Installing AI runtime packages: ${AI_RUNTIME_PACKAGES[*]}"
+      apt-get update -qq
+      DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${AI_RUNTIME_PACKAGES[@]}" >/dev/null
+    fi
+
     # =========================================================================
     # Install Claude Code and Codex (post-boot via systemd, not blocking init)
     # =========================================================================
