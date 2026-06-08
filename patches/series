@@ -26,3 +26,4 @@
 0025-chore-refresh-executor-CLI-pins.patch
 0026-fix-restore-project-kanban-routes.patch
 0027-fix-isolate-Codex-npx-cache.patch
+0028-feat-add-AntiGravity-CLI-executor.patch

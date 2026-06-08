@@ -1,0 +1,862 @@
+From f603a8eb3b4a63c8ab6ea08d6881b8d285d59b7e Mon Sep 17 00:00:00 2001
+From: Riajul Islam <kmriajulislami@gmail.com>
+Date: Mon, 8 Jun 2026 10:24:38 +0600
+Subject: [PATCH] feat: add AntiGravity executor
+
+---
+ crates/executors/default_profiles.json        |   7 +
+ crates/executors/src/executors/antigravity.rs | 532 ++++++++++++++++++
+ crates/executors/src/executors/mod.rs         |  11 +-
+ crates/executors/src/mcp_config.rs            |   3 +-
+ crates/executors/src/profile.rs               |  13 +
+ crates/server/src/bin/generate_types.rs       |   5 +
+ packages/public/agents/antigravity-dark.svg   |   3 +
+ packages/public/agents/antigravity-light.svg  |   3 +
+ .../src/shared/components/AgentIcon.tsx       |   5 +
+ shared/schemas/anti_gravity.json              |  99 ++++
+ shared/types.ts                               |   8 +-
+ 11 files changed, 683 insertions(+), 6 deletions(-)
+ create mode 100644 crates/executors/src/executors/antigravity.rs
+ create mode 100644 packages/public/agents/antigravity-dark.svg
+ create mode 100644 packages/public/agents/antigravity-light.svg
+ create mode 100644 shared/schemas/anti_gravity.json
+
+diff --git a/crates/executors/default_profiles.json b/crates/executors/default_profiles.json
+index 70356c477..2fcd49f0e 100644
+--- a/crates/executors/default_profiles.json
++++ b/crates/executors/default_profiles.json
+@@ -49,6 +49,13 @@
+         }
+       }
+     },
++    "ANTI_GRAVITY": {
++      "DEFAULT": {
++        "ANTI_GRAVITY": {
++          "dangerously_skip_permissions": true
++        }
++      }
++    },
+     "CURSOR_AGENT": {
+       "DEFAULT": {
+         "CURSOR_AGENT": {
+diff --git a/crates/executors/src/executors/antigravity.rs b/crates/executors/src/executors/antigravity.rs
+new file mode 100644
+index 000000000..40213faf5
+--- /dev/null
++++ b/crates/executors/src/executors/antigravity.rs
+@@ -0,0 +1,532 @@
++use std::{
++    env, fs,
++    path::{Path, PathBuf},
++    process::Stdio,
++    sync::{
++        Arc,
++        atomic::{AtomicU32, Ordering},
++    },
++};
++
++use async_trait::async_trait;
++use derivative::Derivative;
++use futures::StreamExt;
++use schemars::JsonSchema;
++use serde::{Deserialize, Serialize};
++use tokio::process::Command;
++use ts_rs::TS;
++use uuid::Uuid;
++use workspace_utils::{command_ext::GroupSpawnNoWindowExt, msg_store::MsgStore};
++
++use crate::{
++    command::{CmdOverrides, CommandBuildError, CommandBuilder, CommandParts, apply_overrides},
++    env::ExecutionEnv,
++    executor_discovery::ExecutorDiscoveredOptions,
++    executors::{
++        AppendPrompt, AvailabilityInfo, BaseCodingAgent, ExecutorError, SpawnedChild,
++        StandardCodingAgentExecutor,
++    },
++    logs::{
++        NormalizedEntry, NormalizedEntryError, NormalizedEntryType, TokenUsageInfo,
++        utils::{
++            EntryIndexProvider,
++            patch::{self, add_normalized_entry, replace_normalized_entry},
++        },
++    },
++    model_selector::{ModelSelectorConfig, PermissionPolicy},
++    profile::ExecutorConfig,
++};
++
++const DEFAULT_ANTIGRAVITY_CONTEXT_WINDOW: u32 = 1_048_576;
++const PROMPT_CHARS_MARKER: &str = "VIBE_KANBAN_AGY_PROMPT_CHARS=";
++const CONVERSATION_ID_MARKER: &str = "VIBE_KANBAN_AGY_CONVERSATION_ID=";
++
++const AGY_WRAPPER_SCRIPT: &str = r#"
++agy_bin=$1
++agy_log=$2
++agy_prompt_chars=$3
++shift 3
++
++printf '\nVIBE_KANBAN_AGY_PROMPT_CHARS=%s\n' "$agy_prompt_chars" >&2
++
++"$agy_bin" "$@" --log-file "$agy_log"
++status=$?
++
++if [ -f "$agy_log" ]; then
++  agy_conversation_id=$(sed -nE 's/.*(Created conversation |Print mode: conversation=)([0-9a-fA-F-]{36}).*/\2/p' "$agy_log" | tail -n 1)
++  if [ -n "$agy_conversation_id" ]; then
++    printf '\nVIBE_KANBAN_AGY_CONVERSATION_ID=%s\n' "$agy_conversation_id" >&2
++  fi
++  rm -f "$agy_log"
++fi
++
++exit "$status"
++"#;
++
++#[derive(Derivative, Clone, Serialize, Deserialize, TS, JsonSchema)]
++#[derivative(Debug, PartialEq)]
++pub struct AntiGravity {
++    #[serde(default)]
++    pub append_prompt: AppendPrompt,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[schemars(
++        title = "Model",
++        description = "Model name or ID passed to `agy --model`."
++    )]
++    pub model: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[schemars(
++        title = "Dangerously Skip Permissions",
++        description = "Pass `--dangerously-skip-permissions` to AntiGravity CLI."
++    )]
++    pub dangerously_skip_permissions: Option<bool>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[schemars(
++        title = "Sandbox",
++        description = "Pass `--sandbox` to AntiGravity CLI."
++    )]
++    pub sandbox: Option<bool>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[schemars(
++        title = "Print Timeout",
++        description = "Timeout passed to `agy --print-timeout`, for example `5m0s` or `30s`."
++    )]
++    pub print_timeout: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[schemars(
++        title = "Additional Directories",
++        description = "Extra directories passed as repeated `agy --add-dir` values."
++    )]
++    pub add_dir: Option<Vec<String>>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[schemars(
++        title = "Context Window",
++        description = "Context window used for Vibe Kanban's context usage gauge. AntiGravity CLI does not currently expose exact token usage, so usage is estimated."
++    )]
++    pub context_window: Option<u32>,
++    #[serde(flatten)]
++    pub cmd: CmdOverrides,
++}
++
++impl AntiGravity {
++    fn build_command_builder(&self) -> Result<CommandBuilder, CommandBuildError> {
++        let mut builder = CommandBuilder::new("agy");
++
++        if self.dangerously_skip_permissions.unwrap_or(true) {
++            builder = builder.extend_params(["--dangerously-skip-permissions"]);
++        }
++
++        if self.sandbox.unwrap_or(false) {
++            builder = builder.extend_params(["--sandbox"]);
++        }
++
++        if let Some(model) = &self.model {
++            builder = builder.extend_params(["--model", model]);
++        }
++
++        if let Some(timeout) = &self.print_timeout {
++            builder = builder.extend_params(["--print-timeout", timeout]);
++        }
++
++        if let Some(dirs) = &self.add_dir {
++            for dir in dirs {
++                builder = builder.extend_params(["--add-dir", dir]);
++            }
++        }
++
++        apply_overrides(builder, &self.cmd)
++    }
++
++    async fn spawn_internal(
++        &self,
++        current_dir: &Path,
++        prompt: &str,
++        session_id: Option<&str>,
++        env: &ExecutionEnv,
++    ) -> Result<SpawnedChild, ExecutorError> {
++        let combined_prompt = self.append_prompt.combine_prompt(prompt);
++        let mut additional_args = Vec::new();
++
++        if let Some(session_id) = session_id {
++            additional_args.push("--conversation".to_string());
++            additional_args.push(session_id.to_string());
++        }
++
++        additional_args.push("-p".to_string());
++        additional_args.push(combined_prompt.clone());
++
++        let command_parts = self
++            .build_command_builder()?
++            .build_follow_up(&additional_args)?;
++
++        spawn_agy(
++            command_parts,
++            current_dir,
++            env,
++            &self.cmd,
++            combined_prompt.chars().count(),
++        )
++        .await
++    }
++
++    fn effective_context_window(&self) -> u32 {
++        self.context_window
++            .filter(|value| *value > 0)
++            .unwrap_or(DEFAULT_ANTIGRAVITY_CONTEXT_WINDOW)
++    }
++}
++
++#[async_trait]
++impl StandardCodingAgentExecutor for AntiGravity {
++    fn apply_overrides(&mut self, executor_config: &ExecutorConfig) {
++        if let Some(model_id) = &executor_config.model_id {
++            self.model = Some(model_id.clone());
++        }
++        if let Some(permission_policy) = executor_config.permission_policy.clone() {
++            self.dangerously_skip_permissions =
++                Some(matches!(permission_policy, PermissionPolicy::Auto));
++        }
++    }
++
++    async fn spawn(
++        &self,
++        current_dir: &Path,
++        prompt: &str,
++        env: &ExecutionEnv,
++    ) -> Result<SpawnedChild, ExecutorError> {
++        self.spawn_internal(current_dir, prompt, None, env).await
++    }
++
++    async fn spawn_follow_up(
++        &self,
++        current_dir: &Path,
++        prompt: &str,
++        session_id: &str,
++        _reset_to_message_id: Option<&str>,
++        env: &ExecutionEnv,
++    ) -> Result<SpawnedChild, ExecutorError> {
++        self.spawn_internal(current_dir, prompt, Some(session_id), env)
++            .await
++    }
++
++    fn normalize_logs(
++        &self,
++        msg_store: Arc<MsgStore>,
++        _worktree_path: &Path,
++    ) -> Vec<tokio::task::JoinHandle<()>> {
++        normalize_logs(msg_store, self.effective_context_window())
++    }
++
++    fn default_mcp_config_path(&self) -> Option<PathBuf> {
++        antigravity_config_dir(&self.cmd).map(|dir| dir.join("mcp_config.json"))
++    }
++
++    fn get_availability_info(&self) -> AvailabilityInfo {
++        let binary_found =
++            workspace_utils::shell::resolve_executable_path_blocking("agy").is_some();
++        if !binary_found {
++            return AvailabilityInfo::NotFound;
++        }
++
++        if let Some(timestamp) = antigravity_cli_home(&self.cmd)
++            .and_then(|home| std::fs::metadata(home.join("installation_id")).ok())
++            .and_then(|m| m.modified().ok())
++            .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
++            .map(|d| d.as_secs() as i64)
++        {
++            return AvailabilityInfo::LoginDetected {
++                last_auth_timestamp: timestamp,
++            };
++        }
++
++        AvailabilityInfo::InstallationFound
++    }
++
++    fn get_preset_options(&self) -> ExecutorConfig {
++        ExecutorConfig {
++            executor: BaseCodingAgent::AntiGravity,
++            variant: None,
++            model_id: self.model.clone(),
++            agent_id: None,
++            reasoning_id: None,
++            permission_policy: Some(PermissionPolicy::Auto),
++        }
++    }
++
++    async fn discover_options(
++        &self,
++        _workdir: Option<&Path>,
++        _repo_path: Option<&Path>,
++    ) -> Result<futures::stream::BoxStream<'static, json_patch::Patch>, ExecutorError> {
++        let options = ExecutorDiscoveredOptions {
++            model_selector: ModelSelectorConfig {
++                permissions: vec![PermissionPolicy::Auto],
++                ..Default::default()
++            },
++            ..Default::default()
++        };
++        Ok(Box::pin(futures::stream::once(async move {
++            patch::executor_discovered_options(options)
++        })))
++    }
++}
++
++async fn spawn_agy(
++    command_parts: CommandParts,
++    current_dir: &Path,
++    env: &ExecutionEnv,
++    cmd_overrides: &CmdOverrides,
++    prompt_chars: usize,
++) -> Result<SpawnedChild, ExecutorError> {
++    let (program_path, args) = command_parts.into_resolved().await?;
++    let log_path = antigravity_temp_log_path()?;
++
++    let mut command = Command::new("sh");
++    command
++        .kill_on_drop(true)
++        .stdin(Stdio::null())
++        .stdout(Stdio::piped())
++        .stderr(Stdio::piped())
++        .current_dir(current_dir)
++        .arg("-c")
++        .arg(AGY_WRAPPER_SCRIPT)
++        .arg("vibe-kanban-agy")
++        .arg(program_path)
++        .arg(log_path)
++        .arg(prompt_chars.to_string())
++        .args(args);
++
++    env.clone()
++        .with_profile(cmd_overrides)
++        .apply_to_command(&mut command);
++
++    Ok(command.group_spawn_no_window()?.into())
++}
++
++fn normalize_logs(
++    msg_store: Arc<MsgStore>,
++    context_window: u32,
++) -> Vec<tokio::task::JoinHandle<()>> {
++    let entry_index = EntryIndexProvider::start_from(&msg_store);
++    let prompt_tokens = Arc::new(AtomicU32::new(0));
++
++    let stdout_handle = normalize_stdout_logs(
++        msg_store.clone(),
++        entry_index.clone(),
++        prompt_tokens.clone(),
++        context_window,
++    );
++    let stderr_handle = normalize_stderr_logs(msg_store, entry_index, prompt_tokens);
++
++    vec![stdout_handle, stderr_handle]
++}
++
++fn normalize_stdout_logs(
++    msg_store: Arc<MsgStore>,
++    entry_index: EntryIndexProvider,
++    prompt_tokens: Arc<AtomicU32>,
++    context_window: u32,
++) -> tokio::task::JoinHandle<()> {
++    tokio::spawn(async move {
++        let mut stdout = msg_store.stdout_chunked_stream();
++        let mut output = String::new();
++        let mut entry: Option<usize> = None;
++
++        while let Some(Ok(chunk)) = stdout.next().await {
++            output.push_str(&chunk);
++            let content = strip_ansi_escapes::strip_str(output.trim_end()).to_string();
++            if content.trim().is_empty() {
++                continue;
++            }
++
++            let normalized = NormalizedEntry {
++                timestamp: None,
++                entry_type: NormalizedEntryType::AssistantMessage,
++                content,
++                metadata: None,
++            };
++
++            if let Some(index) = entry {
++                replace_normalized_entry(&msg_store, index, normalized);
++            } else {
++                let index = add_normalized_entry(&msg_store, &entry_index, normalized);
++                entry = Some(index);
++            }
++        }
++
++        let total_tokens = prompt_tokens
++            .load(Ordering::Relaxed)
++            .saturating_add(estimate_tokens(&output));
++        if total_tokens > 0 {
++            add_token_usage_entry(&msg_store, &entry_index, total_tokens, context_window);
++        }
++    })
++}
++
++fn normalize_stderr_logs(
++    msg_store: Arc<MsgStore>,
++    entry_index: EntryIndexProvider,
++    prompt_tokens: Arc<AtomicU32>,
++) -> tokio::task::JoinHandle<()> {
++    tokio::spawn(async move {
++        let mut stderr = msg_store.stderr_chunked_stream();
++        let mut buffer = String::new();
++        let mut stored_session_id = false;
++
++        while let Some(Ok(chunk)) = stderr.next().await {
++            buffer.push_str(&chunk);
++            let complete_lines = buffer
++                .split_inclusive('\n')
++                .filter(|line| line.ends_with('\n'))
++                .map(str::to_string)
++                .collect::<Vec<_>>();
++
++            for line in complete_lines {
++                handle_stderr_line(
++                    &line,
++                    &msg_store,
++                    &entry_index,
++                    &prompt_tokens,
++                    &mut stored_session_id,
++                );
++            }
++
++            buffer = buffer.rsplit('\n').next().unwrap_or_default().to_string();
++        }
++
++        if !buffer.trim().is_empty() {
++            handle_stderr_line(
++                &buffer,
++                &msg_store,
++                &entry_index,
++                &prompt_tokens,
++                &mut stored_session_id,
++            );
++        }
++    })
++}
++
++fn handle_stderr_line(
++    line: &str,
++    msg_store: &Arc<MsgStore>,
++    entry_index: &EntryIndexProvider,
++    prompt_tokens: &AtomicU32,
++    stored_session_id: &mut bool,
++) {
++    let trimmed = line.trim();
++    if trimmed.is_empty() {
++        return;
++    }
++
++    if let Some(raw) = trimmed.strip_prefix(PROMPT_CHARS_MARKER) {
++        if let Ok(chars) = raw.parse::<u32>() {
++            prompt_tokens.store(estimate_tokens_from_chars(chars), Ordering::Relaxed);
++        }
++        return;
++    }
++
++    if let Some(session_id) = trimmed.strip_prefix(CONVERSATION_ID_MARKER) {
++        if !*stored_session_id && is_uuid_like(session_id) {
++            msg_store.push_session_id(session_id.to_string());
++            *stored_session_id = true;
++        }
++        return;
++    }
++
++    add_normalized_entry(
++        msg_store,
++        entry_index,
++        NormalizedEntry {
++            timestamp: None,
++            entry_type: NormalizedEntryType::ErrorMessage {
++                error_type: NormalizedEntryError::Other,
++            },
++            content: strip_ansi_escapes::strip_str(trimmed),
++            metadata: None,
++        },
++    );
++}
++
++fn add_token_usage_entry(
++    msg_store: &Arc<MsgStore>,
++    entry_index: &EntryIndexProvider,
++    total_tokens: u32,
++    context_window: u32,
++) {
++    add_normalized_entry(
++        msg_store,
++        entry_index,
++        NormalizedEntry {
++            timestamp: None,
++            entry_type: NormalizedEntryType::TokenUsageInfo(TokenUsageInfo {
++                total_tokens,
++                model_context_window: context_window,
++            }),
++            content: format!(
++                "Estimated tokens used: {total_tokens} / Context window: {context_window}"
++            ),
++            metadata: None,
++        },
++    );
++}
++
++fn estimate_tokens(text: &str) -> u32 {
++    estimate_tokens_from_chars(text.chars().count().try_into().unwrap_or(u32::MAX))
++}
++
++fn estimate_tokens_from_chars(chars: u32) -> u32 {
++    if chars == 0 { 0 } else { chars.div_ceil(4) }
++}
++
++fn is_uuid_like(value: &str) -> bool {
++    value.len() == 36 && value.chars().all(|ch| ch.is_ascii_hexdigit() || ch == '-')
++}
++
++fn antigravity_temp_log_path() -> Result<PathBuf, ExecutorError> {
++    let dir = env::temp_dir().join("vibe-kanban-agy");
++    fs::create_dir_all(&dir).map_err(ExecutorError::Io)?;
++    Ok(dir.join(format!("{}.log", Uuid::new_v4())))
++}
++
++fn non_empty_env_path(cmd: &CmdOverrides, key: &str) -> Option<PathBuf> {
++    cmd.env
++        .as_ref()
++        .and_then(|vars| vars.get(key))
++        .filter(|value| !value.trim().is_empty())
++        .map(PathBuf::from)
++        .or_else(|| {
++            env::var(key)
++                .ok()
++                .filter(|value| !value.trim().is_empty())
++                .map(PathBuf::from)
++        })
++}
++
++fn antigravity_cli_home(cmd: &CmdOverrides) -> Option<PathBuf> {
++    non_empty_env_path(cmd, "ANTIGRAVITY_CLI_HOME")
++        .or_else(|| dirs::home_dir().map(|home| home.join(".gemini").join("antigravity-cli")))
++}
++
++fn antigravity_config_dir(cmd: &CmdOverrides) -> Option<PathBuf> {
++    non_empty_env_path(cmd, "ANTIGRAVITY_CONFIG_DIR")
++        .or_else(|| dirs::home_dir().map(|home| home.join(".gemini").join("config")))
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn detects_wrapper_conversation_marker() {
++        assert!(is_uuid_like("3df9e047-12aa-4101-93e3-8a30ab0cbe43"));
++        assert!(!is_uuid_like("not-a-session"));
++    }
++
++    #[test]
++    fn estimates_tokens_from_character_count() {
++        assert_eq!(estimate_tokens_from_chars(0), 0);
++        assert_eq!(estimate_tokens_from_chars(1), 1);
++        assert_eq!(estimate_tokens_from_chars(4), 1);
++        assert_eq!(estimate_tokens_from_chars(5), 2);
++    }
++}
+diff --git a/crates/executors/src/executors/mod.rs b/crates/executors/src/executors/mod.rs
+index 7f345af9e..5651fc041 100644
+--- a/crates/executors/src/executors/mod.rs
++++ b/crates/executors/src/executors/mod.rs
+@@ -22,8 +22,9 @@ use crate::{
+     command::CommandBuildError,
+     env::ExecutionEnv,
+     executors::{
+-        amp::Amp, claude::ClaudeCode, codex::Codex, copilot::Copilot, cursor::CursorAgent,
+-        droid::Droid, gemini::Gemini, kimi::KimiCode, opencode::Opencode, qwen::QwenCode,
++        amp::Amp, antigravity::AntiGravity, claude::ClaudeCode, codex::Codex, copilot::Copilot,
++        cursor::CursorAgent, droid::Droid, gemini::Gemini, kimi::KimiCode, opencode::Opencode,
++        qwen::QwenCode,
+     },
+     logs::utils::patch,
+     mcp_config::McpConfig,
+@@ -32,6 +33,7 @@ use crate::{
+ 
+ pub mod acp;
+ pub mod amp;
++pub mod antigravity;
+ pub mod claude;
+ pub mod codex;
+ pub mod copilot;
+@@ -119,6 +121,7 @@ pub enum CodingAgent {
+     CursorAgent,
+     QwenCode,
+     KimiCode,
++    AntiGravity,
+     Copilot,
+     Droid,
+     #[cfg(feature = "qa-mode")]
+@@ -198,6 +201,10 @@ impl CodingAgent {
+                 BaseAgentCapability::SessionFork,
+                 BaseAgentCapability::ContextUsage,
+             ],
++            Self::AntiGravity(_) => vec![
++                BaseAgentCapability::SessionFork,
++                BaseAgentCapability::ContextUsage,
++            ],
+             Self::CursorAgent(_) => vec![BaseAgentCapability::SetupHelper],
+             Self::Amp(_) | Self::Copilot(_) | Self::Droid(_) => vec![],
+             #[cfg(feature = "qa-mode")]
+diff --git a/crates/executors/src/mcp_config.rs b/crates/executors/src/mcp_config.rs
+index b5bc88805..bab649355 100644
+--- a/crates/executors/src/mcp_config.rs
++++ b/crates/executors/src/mcp_config.rs
+@@ -400,7 +400,8 @@ impl CodingAgent {
+             CodingAgent::ClaudeCode(_)
+             | CodingAgent::Amp(_)
+             | CodingAgent::Droid(_)
+-            | CodingAgent::KimiCode(_) => Passthrough,
++            | CodingAgent::KimiCode(_)
++            | CodingAgent::AntiGravity(_) => Passthrough,
+             CodingAgent::QwenCode(_) | CodingAgent::Gemini(_) => Gemini,
+             CodingAgent::CursorAgent(_) => Cursor,
+             CodingAgent::Codex(_) => Codex,
+diff --git a/crates/executors/src/profile.rs b/crates/executors/src/profile.rs
+index a46710680..7ef5e9f99 100644
+--- a/crates/executors/src/profile.rs
++++ b/crates/executors/src/profile.rs
+@@ -569,4 +569,17 @@ mod tests {
+         assert!(defaults.get_coding_agent(&profile_id).is_some());
+         assert!(defaults.executors.contains_key(&BaseCodingAgent::KimiCode));
+     }
++
++    #[test]
++    fn defaults_include_antigravity_profile() {
++        let defaults = ExecutorConfigs::from_defaults();
++        let profile_id = ExecutorProfileId::new(BaseCodingAgent::AntiGravity);
++
++        assert!(defaults.get_coding_agent(&profile_id).is_some());
++        assert!(
++            defaults
++                .executors
++                .contains_key(&BaseCodingAgent::AntiGravity)
++        );
++    }
+ }
+diff --git a/crates/server/src/bin/generate_types.rs b/crates/server/src/bin/generate_types.rs
+index 8ca3e2b01..ffb252583 100644
+--- a/crates/server/src/bin/generate_types.rs
++++ b/crates/server/src/bin/generate_types.rs
+@@ -225,6 +225,7 @@ fn generate_types_content() -> String {
+         executors::executors::opencode::Opencode::decl(),
+         executors::executors::qwen::QwenCode::decl(),
+         executors::executors::kimi::KimiCode::decl(),
++        executors::executors::antigravity::AntiGravity::decl(),
+         executors::executors::droid::Droid::decl(),
+         executors::executors::droid::Autonomy::decl(),
+         executors::executors::droid::ReasoningEffortLevel::decl(),
+@@ -348,6 +349,10 @@ fn generate_schemas() -> Result<HashMap<&'static str, String>, serde_json::Error
+             "kimi_code",
+             generate_json_schema::<executors::executors::kimi::KimiCode>()?,
+         ),
++        (
++            "anti_gravity",
++            generate_json_schema::<executors::executors::antigravity::AntiGravity>()?,
++        ),
+         (
+             "copilot",
+             generate_json_schema::<executors::executors::copilot::Copilot>()?,
+diff --git a/packages/public/agents/antigravity-dark.svg b/packages/public/agents/antigravity-dark.svg
+new file mode 100644
+index 000000000..475b656d1
+--- /dev/null
++++ b/packages/public/agents/antigravity-dark.svg
+@@ -0,0 +1,3 @@
++<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
++<path d="M8 2.5L13 13H10.8L9.9 10.9H6.1L5.2 13H3L8 2.5ZM6.8 9.2H9.2L8 6.3L6.8 9.2Z" fill="#8AB4F8"/>
++</svg>
+diff --git a/packages/public/agents/antigravity-light.svg b/packages/public/agents/antigravity-light.svg
+new file mode 100644
+index 000000000..06a4c7c03
+--- /dev/null
++++ b/packages/public/agents/antigravity-light.svg
+@@ -0,0 +1,3 @@
++<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
++<path d="M8 2.5L13 13H10.8L9.9 10.9H6.1L5.2 13H3L8 2.5ZM6.8 9.2H9.2L8 6.3L6.8 9.2Z" fill="#1A73E8"/>
++</svg>
+diff --git a/packages/web-core/src/shared/components/AgentIcon.tsx b/packages/web-core/src/shared/components/AgentIcon.tsx
+index 237bb3cbb..511909e41 100644
+--- a/packages/web-core/src/shared/components/AgentIcon.tsx
++++ b/packages/web-core/src/shared/components/AgentIcon.tsx
+@@ -27,6 +27,8 @@ export function getAgentName(
+       return 'Qwen';
+     case BaseCodingAgent.KIMI_CODE:
+       return 'Kimi';
++    case BaseCodingAgent.ANTI_GRAVITY:
++      return 'AntiGravity';
+     case BaseCodingAgent.COPILOT:
+       return 'Copilot';
+     case BaseCodingAgent.DROID:
+@@ -72,6 +74,9 @@ export function AgentIcon({ agent, className = 'h-4 w-4' }: AgentIconProps) {
+     case BaseCodingAgent.KIMI_CODE:
+       iconPath = `/agents/kimi${suffix}.svg`;
+       break;
++    case BaseCodingAgent.ANTI_GRAVITY:
++      iconPath = `/agents/antigravity${suffix}.svg`;
++      break;
+     case BaseCodingAgent.COPILOT:
+       iconPath = `/agents/copilot${suffix}.svg`;
+       break;
+diff --git a/shared/schemas/anti_gravity.json b/shared/schemas/anti_gravity.json
+new file mode 100644
+index 000000000..8db48845a
+--- /dev/null
++++ b/shared/schemas/anti_gravity.json
+@@ -0,0 +1,99 @@
++{
++  "$schema": "http://json-schema.org/draft-07/schema#",
++  "properties": {
++    "append_prompt": {
++      "title": "Append Prompt",
++      "description": "Extra text appended to the prompt",
++      "type": [
++        "string",
++        "null"
++      ],
++      "format": "textarea",
++      "default": null
++    },
++    "model": {
++      "title": "Model",
++      "description": "Model name or ID passed to `agy --model`.",
++      "type": [
++        "string",
++        "null"
++      ]
++    },
++    "dangerously_skip_permissions": {
++      "title": "Dangerously Skip Permissions",
++      "description": "Pass `--dangerously-skip-permissions` to AntiGravity CLI.",
++      "type": [
++        "boolean",
++        "null"
++      ]
++    },
++    "sandbox": {
++      "title": "Sandbox",
++      "description": "Pass `--sandbox` to AntiGravity CLI.",
++      "type": [
++        "boolean",
++        "null"
++      ]
++    },
++    "print_timeout": {
++      "title": "Print Timeout",
++      "description": "Timeout passed to `agy --print-timeout`, for example `5m0s` or `30s`.",
++      "type": [
++        "string",
++        "null"
++      ]
++    },
++    "add_dir": {
++      "title": "Additional Directories",
++      "description": "Extra directories passed as repeated `agy --add-dir` values.",
++      "type": [
++        "array",
++        "null"
++      ],
++      "items": {
++        "type": "string"
++      }
++    },
++    "context_window": {
++      "title": "Context Window",
++      "description": "Context window used for Vibe Kanban's context usage gauge. AntiGravity CLI does not currently expose exact token usage, so usage is estimated.",
++      "type": [
++        "integer",
++        "null"
++      ],
++      "format": "uint32",
++      "minimum": 0
++    },
++    "base_command_override": {
++      "title": "Base Command Override",
++      "description": "Override the base command with a custom command",
++      "type": [
++        "string",
++        "null"
++      ]
++    },
++    "additional_params": {
++      "title": "Additional Parameters",
++      "description": "Additional parameters to append to the base command",
++      "type": [
++        "array",
++        "null"
++      ],
++      "items": {
++        "type": "string"
++      }
++    },
++    "env": {
++      "title": "Environment Variables",
++      "description": "Environment variables to set when running the executor",
++      "type": [
++        "object",
++        "null"
++      ],
++      "additionalProperties": {
++        "type": "string"
++      }
++    }
++  },
++  "type": "object"
++}
+\ No newline at end of file
+diff --git a/shared/types.ts b/shared/types.ts
+index 8de7b66b0..55b51ef4d 100644
+--- a/shared/types.ts
++++ b/shared/types.ts
+@@ -573,9 +573,9 @@ working_dir: string | null, };
+ 
+ export type ScriptRequestLanguage = "Bash";
+ 
+-export enum BaseCodingAgent { CLAUDE_CODE = "CLAUDE_CODE", AMP = "AMP", GEMINI = "GEMINI", CODEX = "CODEX", OPENCODE = "OPENCODE", CURSOR_AGENT = "CURSOR_AGENT", QWEN_CODE = "QWEN_CODE", KIMI_CODE = "KIMI_CODE", COPILOT = "COPILOT", DROID = "DROID" }
++export enum BaseCodingAgent { CLAUDE_CODE = "CLAUDE_CODE", AMP = "AMP", GEMINI = "GEMINI", CODEX = "CODEX", OPENCODE = "OPENCODE", CURSOR_AGENT = "CURSOR_AGENT", QWEN_CODE = "QWEN_CODE", KIMI_CODE = "KIMI_CODE", ANTI_GRAVITY = "ANTI_GRAVITY", COPILOT = "COPILOT", DROID = "DROID" }
+ 
+-export type CodingAgent = { "CLAUDE_CODE": ClaudeCode } | { "AMP": Amp } | { "GEMINI": Gemini } | { "CODEX": Codex } | { "OPENCODE": Opencode } | { "CURSOR_AGENT": CursorAgent } | { "QWEN_CODE": QwenCode } | { "KIMI_CODE": KimiCode } | { "COPILOT": Copilot } | { "DROID": Droid };
++export type CodingAgent = { "CLAUDE_CODE": ClaudeCode } | { "AMP": Amp } | { "GEMINI": Gemini } | { "CODEX": Codex } | { "OPENCODE": Opencode } | { "CURSOR_AGENT": CursorAgent } | { "QWEN_CODE": QwenCode } | { "KIMI_CODE": KimiCode } | { "ANTI_GRAVITY": AntiGravity } | { "COPILOT": Copilot } | { "DROID": Droid };
+ 
+ export type SlashCommandDescription = { 
+ /**
+@@ -615,7 +615,7 @@ models?: Array<string>,
+  */
+ reasoning_by_model?: { [key in string]?: string }, };
+ 
+-export type ExecutorProfile = { recently_used_models?: ExecutorRecentModels | null, } & ({ [key in string]?: { "CLAUDE_CODE": ClaudeCode } | { "AMP": Amp } | { "GEMINI": Gemini } | { "CODEX": Codex } | { "OPENCODE": Opencode } | { "CURSOR_AGENT": CursorAgent } | { "QWEN_CODE": QwenCode } | { "KIMI_CODE": KimiCode } | { "COPILOT": Copilot } | { "DROID": Droid } });
++export type ExecutorProfile = { recently_used_models?: ExecutorRecentModels | null, } & ({ [key in string]?: { "CLAUDE_CODE": ClaudeCode } | { "AMP": Amp } | { "GEMINI": Gemini } | { "CODEX": Codex } | { "OPENCODE": Opencode } | { "CURSOR_AGENT": CursorAgent } | { "QWEN_CODE": QwenCode } | { "KIMI_CODE": KimiCode } | { "ANTI_GRAVITY": AntiGravity } | { "COPILOT": Copilot } | { "DROID": Droid } });
+ 
+ export type ExecutorConfigs = { executors: { [key in BaseCodingAgent]?: ExecutorProfile }, };
+ 
+@@ -659,6 +659,8 @@ export type QwenCode = { append_prompt: AppendPrompt, model?: string | null, age
+ 
+ export type KimiCode = { append_prompt: AppendPrompt, model?: string | null, yolo?: boolean | null, context_window?: number | null, mcp_config_file?: string | null, mcp_config?: string | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
+ 
++export type AntiGravity = { append_prompt: AppendPrompt, model?: string | null, dangerously_skip_permissions?: boolean | null, sandbox?: boolean | null, print_timeout?: string | null, add_dir?: Array<string> | null, context_window?: number | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
++
+ export type Droid = { append_prompt: AppendPrompt, autonomy: Autonomy, model?: string | null, reasoning_effort?: DroidReasoningEffort | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
+ 
+ export type Autonomy = "normal" | "low" | "medium" | "high" | "skip-permissions-unsafe";
