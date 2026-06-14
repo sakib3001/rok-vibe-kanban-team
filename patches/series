@@ -35,3 +35,4 @@
 0034-fix-Antigravity-workspace-and-transcript-logs.patch
 0035-fix-lock-remote-Docker-build.patch
 0036-fix-keep-remote-lockfile-for-Docker-build.patch
+0037-fix-Antigravity-visible-text-and-workspace-cwd.patch
