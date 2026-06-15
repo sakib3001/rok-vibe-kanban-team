@@ -1,0 +1,406 @@
+diff --git a/crates/executors/src/executors/antigravity.rs b/crates/executors/src/executors/antigravity.rs
+index ae78ccaf3..3079514cd 100644
+--- a/crates/executors/src/executors/antigravity.rs
++++ b/crates/executors/src/executors/antigravity.rs
+@@ -50,6 +50,7 @@ const ANTIGRAVITY_MODEL_DISCOVERY_TIMEOUT_SECS: u64 = 10;
+ const PROMPT_CHARS_MARKER: &str = "VIBE_KANBAN_AGY_PROMPT_CHARS=";
+ const CONVERSATION_ID_MARKER: &str = "VIBE_KANBAN_AGY_CONVERSATION_ID=";
+ const TRANSCRIPT_POLL_INTERVAL_MS: u64 = 500;
++const TRANSCRIPT_FINISH_GRACE_POLLS: usize = 4;
+ const FALLBACK_ANTIGRAVITY_MODELS: &[&str] = &[
+     "Gemini 3.5 Flash (Medium)",
+     "Gemini 3.5 Flash (High)",
+@@ -200,11 +201,11 @@ impl AntiGravity {
+         session_id: Option<&str>,
+         env: &ExecutionEnv,
+     ) -> Result<SpawnedChild, ExecutorError> {
+-        let combined_prompt = self.append_prompt.combine_prompt(prompt);
+-        let mut additional_args = Vec::new();
+         let workspace_dir = current_dir
+             .canonicalize()
+             .unwrap_or_else(|_| current_dir.to_path_buf());
++        let combined_prompt = self.append_prompt.combine_prompt(prompt);
++        let mut additional_args = Vec::new();
+ 
+         additional_args.push("--add-dir".to_string());
+         additional_args.push(workspace_dir.to_string_lossy().to_string());
+@@ -223,7 +224,7 @@ impl AntiGravity {
+ 
+         spawn_agy(
+             command_parts,
+-            current_dir,
++            &workspace_dir,
+             env,
+             &self.cmd,
+             combined_prompt.chars().count(),
+@@ -400,14 +401,15 @@ fn normalize_logs(
+ ) -> Vec<tokio::task::JoinHandle<()>> {
+     let entry_index = EntryIndexProvider::start_from(&msg_store);
+     let prompt_tokens = Arc::new(AtomicU32::new(0));
+-    let transcript_final_answer_seen = Arc::new(AtomicBool::new(false));
++    let transcript_assistant_message_seen = Arc::new(AtomicBool::new(false));
++    let worktree_path = worktree_path.canonicalize().unwrap_or(worktree_path);
+ 
+     let stdout_handle = normalize_stdout_logs(
+         msg_store.clone(),
+         entry_index.clone(),
+         prompt_tokens.clone(),
+         context_window,
+-        transcript_final_answer_seen.clone(),
++        transcript_assistant_message_seen.clone(),
+     );
+     let stderr_handle = normalize_stderr_logs(
+         msg_store,
+@@ -416,7 +418,7 @@ fn normalize_logs(
+         context_window,
+         antigravity_home,
+         worktree_path,
+-        transcript_final_answer_seen,
++        transcript_assistant_message_seen,
+     );
+ 
+     vec![stdout_handle, stderr_handle]
+@@ -427,7 +429,7 @@ fn normalize_stdout_logs(
+     entry_index: EntryIndexProvider,
+     prompt_tokens: Arc<AtomicU32>,
+     context_window: u32,
+-    transcript_final_answer_seen: Arc<AtomicBool>,
++    transcript_assistant_message_seen: Arc<AtomicBool>,
+ ) -> tokio::task::JoinHandle<()> {
+     tokio::spawn(async move {
+         let mut stdout = msg_store.stdout_chunked_stream();
+@@ -437,8 +439,10 @@ fn normalize_stdout_logs(
+             output.push_str(&chunk);
+         }
+ 
+-        tokio::time::sleep(Duration::from_millis(TRANSCRIPT_POLL_INTERVAL_MS)).await;
+-        if transcript_final_answer_seen.load(Ordering::Relaxed) {
++        let fallback_delay =
++            TRANSCRIPT_POLL_INTERVAL_MS * (TRANSCRIPT_FINISH_GRACE_POLLS as u64 + 1);
++        tokio::time::sleep(Duration::from_millis(fallback_delay)).await;
++        if transcript_assistant_message_seen.load(Ordering::Relaxed) {
+             return;
+         }
+ 
+@@ -457,7 +461,7 @@ fn normalize_stdout_logs(
+                 metadata: None,
+             },
+         );
+-        transcript_final_answer_seen.store(true, Ordering::Relaxed);
++        transcript_assistant_message_seen.store(true, Ordering::Relaxed);
+ 
+         let total_tokens = prompt_tokens
+             .load(Ordering::Relaxed)
+@@ -475,7 +479,7 @@ fn normalize_stderr_logs(
+     context_window: u32,
+     antigravity_home: Option<PathBuf>,
+     worktree_path: PathBuf,
+-    transcript_final_answer_seen: Arc<AtomicBool>,
++    transcript_assistant_message_seen: Arc<AtomicBool>,
+ ) -> tokio::task::JoinHandle<()> {
+     tokio::spawn(async move {
+         let mut stderr = msg_store.stderr_chunked_stream();
+@@ -499,7 +503,7 @@ fn normalize_stderr_logs(
+                     context_window,
+                     antigravity_home.as_ref(),
+                     &worktree_path,
+-                    &transcript_final_answer_seen,
++                    &transcript_assistant_message_seen,
+                     &mut stored_session_id,
+                 );
+             }
+@@ -516,7 +520,7 @@ fn normalize_stderr_logs(
+                 context_window,
+                 antigravity_home.as_ref(),
+                 &worktree_path,
+-                &transcript_final_answer_seen,
++                &transcript_assistant_message_seen,
+                 &mut stored_session_id,
+             );
+         }
+@@ -531,7 +535,7 @@ fn handle_stderr_line(
+     context_window: u32,
+     antigravity_home: Option<&PathBuf>,
+     worktree_path: &Path,
+-    transcript_final_answer_seen: &Arc<AtomicBool>,
++    transcript_assistant_message_seen: &Arc<AtomicBool>,
+     stored_session_id: &mut bool,
+ ) {
+     let trimmed = line.trim();
+@@ -559,7 +563,7 @@ fn handle_stderr_line(
+                     context_window,
+                     transcript_path,
+                     worktree_path.to_path_buf(),
+-                    transcript_final_answer_seen.clone(),
++                    transcript_assistant_message_seen.clone(),
+                 ));
+             }
+         }
+@@ -614,10 +618,10 @@ struct AntigravityTranscriptState {
+     prompt_tokens: Arc<AtomicU32>,
+     context_window: u32,
+     worktree_path: String,
+-    transcript_final_answer_seen: Arc<AtomicBool>,
++    transcript_assistant_message_seen: Arc<AtomicBool>,
+     pending_tools: VecDeque<AntigravityToolInfo>,
+     output_chars: usize,
+-    final_answer_added: bool,
++    assistant_message_added: bool,
+     token_usage_added: bool,
+ }
+ 
+@@ -627,17 +631,17 @@ impl AntigravityTranscriptState {
+         prompt_tokens: Arc<AtomicU32>,
+         context_window: u32,
+         worktree_path: PathBuf,
+-        transcript_final_answer_seen: Arc<AtomicBool>,
++        transcript_assistant_message_seen: Arc<AtomicBool>,
+     ) -> Self {
+         Self {
+             entry_index,
+             prompt_tokens,
+             context_window,
+             worktree_path: worktree_path.to_string_lossy().to_string(),
+-            transcript_final_answer_seen,
++            transcript_assistant_message_seen,
+             pending_tools: VecDeque::new(),
+             output_chars: 0,
+-            final_answer_added: false,
++            assistant_message_added: false,
+             token_usage_added: false,
+         }
+     }
+@@ -721,13 +725,16 @@ impl AntigravityTranscriptState {
+         msg_store: &Arc<MsgStore>,
+     ) {
+         if step.step_type == "PLANNER_RESPONSE" && matches!(step.source.as_deref(), Some("MODEL")) {
+-            if self
+-                .transcript_final_answer_seen
+-                .swap(true, Ordering::Relaxed)
++            if !self.assistant_message_added
++                && self
++                    .transcript_assistant_message_seen
++                    .load(Ordering::Relaxed)
+             {
+                 return;
+             }
+-            self.final_answer_added = true;
++            self.assistant_message_added = true;
++            self.transcript_assistant_message_seen
++                .store(true, Ordering::Relaxed);
+             add_normalized_entry(
+                 msg_store,
+                 &self.entry_index,
+@@ -857,6 +864,10 @@ impl AntigravityTranscriptState {
+             );
+         }
+     }
++
++    fn has_output(&self) -> bool {
++        self.output_chars > 0 || self.assistant_message_added
++    }
+ }
+ 
+ async fn tail_antigravity_transcript(
+@@ -866,14 +877,14 @@ async fn tail_antigravity_transcript(
+     context_window: u32,
+     transcript_path: PathBuf,
+     worktree_path: PathBuf,
+-    transcript_final_answer_seen: Arc<AtomicBool>,
++    transcript_assistant_message_seen: Arc<AtomicBool>,
+ ) {
+     let mut state = AntigravityTranscriptState::new(
+         entry_index,
+         prompt_tokens,
+         context_window,
+         worktree_path,
+-        transcript_final_answer_seen,
++        transcript_assistant_message_seen,
+     );
+     let mut processed_steps = HashSet::new();
+     let mut msg_stream = msg_store.history_plus_stream();
+@@ -882,19 +893,18 @@ async fn tail_antigravity_transcript(
+         tokio::select! {
+             _ = tokio::time::sleep(Duration::from_millis(TRANSCRIPT_POLL_INTERVAL_MS)) => {
+                 read_new_transcript_steps(&transcript_path, &mut processed_steps, &mut state, &msg_store).await;
+-                if state.final_answer_added {
+-                    state.add_token_usage(&msg_store);
+-                    return;
+-                }
+-                if state.transcript_final_answer_seen.load(Ordering::Relaxed) {
+-                    return;
+-                }
+             }
+             maybe_msg = msg_stream.next() => {
+                 match maybe_msg {
+                     Some(Ok(LogMsg::Finished)) | None => {
+-                        read_new_transcript_steps(&transcript_path, &mut processed_steps, &mut state, &msg_store).await;
+-                        if state.final_answer_added {
++                        drain_transcript_after_finish(
++                            &transcript_path,
++                            &mut processed_steps,
++                            &mut state,
++                            &msg_store,
++                        )
++                        .await;
++                        if state.has_output() {
+                             state.add_token_usage(&msg_store);
+                         }
+                         return;
+@@ -906,6 +916,20 @@ async fn tail_antigravity_transcript(
+     }
+ }
+ 
++async fn drain_transcript_after_finish(
++    transcript_path: &Path,
++    processed_steps: &mut HashSet<u64>,
++    state: &mut AntigravityTranscriptState,
++    msg_store: &Arc<MsgStore>,
++) {
++    read_new_transcript_steps(transcript_path, processed_steps, state, msg_store).await;
++
++    for _ in 0..TRANSCRIPT_FINISH_GRACE_POLLS {
++        tokio::time::sleep(Duration::from_millis(TRANSCRIPT_POLL_INTERVAL_MS)).await;
++        read_new_transcript_steps(transcript_path, processed_steps, state, msg_store).await;
++    }
++}
++
+ async fn read_new_transcript_steps(
+     transcript_path: &Path,
+     processed_steps: &mut HashSet<u64>,
+@@ -1047,6 +1071,7 @@ fn expected_step_type_for_tool(tool_name: &str) -> String {
+         "view_file" | "read_file" => "VIEW_FILE",
+         "list_dir" | "list_directory" => "LIST_DIRECTORY",
+         "write_to_file" | "write_file" => "CODE_ACTION",
++        "grep_search" | "search" => "GREP_SEARCH",
+         "generate_image" => "GENERATE_IMAGE",
+         "schedule" => "GENERIC",
+         _ => "GENERIC",
+@@ -1061,6 +1086,7 @@ fn is_antigravity_tool_result_step(step_type: &str) -> bool {
+             | "LIST_DIRECTORY"
+             | "VIEW_FILE"
+             | "CODE_ACTION"
++            | "GREP_SEARCH"
+             | "GENERATE_IMAGE"
+             | "GENERIC"
+     )
+@@ -1490,15 +1516,15 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn transcript_steps_create_thinking_tool_and_result_entries() {
++    fn transcript_steps_create_thinking_tool_result_and_assistant_entries() {
+         let msg_store = Arc::new(MsgStore::new());
+-        let final_seen = Arc::new(AtomicBool::new(false));
++        let assistant_seen = Arc::new(AtomicBool::new(false));
+         let mut state = AntigravityTranscriptState::new(
+             EntryIndexProvider::test_new(),
+             Arc::new(AtomicU32::new(0)),
+             DEFAULT_ANTIGRAVITY_CONTEXT_WINDOW,
+             PathBuf::from("/repo"),
+-            final_seen,
++            assistant_seen,
+         );
+ 
+         let planner = serde_json::from_value::<AntigravityTranscriptStep>(serde_json::json!({
+@@ -1531,6 +1557,28 @@ mod tests {
+         .unwrap();
+         state.handle_step(result, &msg_store);
+ 
++        let assistant = serde_json::from_value::<AntigravityTranscriptStep>(serde_json::json!({
++            "step_index": 3,
++            "source": "MODEL",
++            "type": "PLANNER_RESPONSE",
++            "status": "DONE",
++            "created_at": "2026-06-14T00:00:02Z",
++            "content": "The workspace is /repo."
++        }))
++        .unwrap();
++        state.handle_step(assistant, &msg_store);
++
++        let follow_up = serde_json::from_value::<AntigravityTranscriptStep>(serde_json::json!({
++            "step_index": 4,
++            "source": "MODEL",
++            "type": "PLANNER_RESPONSE",
++            "status": "DONE",
++            "created_at": "2026-06-14T00:00:03Z",
++            "content": "Done."
++        }))
++        .unwrap();
++        state.handle_step(follow_up, &msg_store);
++
+         let entries = latest_normalized_entries(&msg_store);
+         assert!(matches!(
+             entries.first().map(|entry| &entry.entry_type),
+@@ -1562,5 +1610,71 @@ mod tests {
+             }
+             other => panic!("unexpected tool entry: {other:?}"),
+         }
++
++        let assistant_messages = entries
++            .iter()
++            .filter(|entry| matches!(entry.entry_type, NormalizedEntryType::AssistantMessage))
++            .map(|entry| entry.content.as_str())
++            .collect::<Vec<_>>();
++        assert_eq!(assistant_messages, vec!["The workspace is /repo.", "Done."]);
++    }
++
++    #[test]
++    fn transcript_grep_search_result_replaces_pending_tool() {
++        let msg_store = Arc::new(MsgStore::new());
++        let mut state = AntigravityTranscriptState::new(
++            EntryIndexProvider::test_new(),
++            Arc::new(AtomicU32::new(0)),
++            DEFAULT_ANTIGRAVITY_CONTEXT_WINDOW,
++            PathBuf::from("/repo"),
++            Arc::new(AtomicBool::new(false)),
++        );
++
++        let planner = serde_json::from_value::<AntigravityTranscriptStep>(serde_json::json!({
++            "step_index": 1,
++            "source": "MODEL",
++            "type": "PLANNER_RESPONSE",
++            "status": "DONE",
++            "tool_calls": [{
++                "name": "grep_search",
++                "args": {
++                    "Query": "\"needle\"",
++                    "SearchPath": "\"/repo\"",
++                    "toolAction": "\"Searching for needle\""
++                }
++            }]
++        }))
++        .unwrap();
++        state.handle_step(planner, &msg_store);
++
++        let result = serde_json::from_value::<AntigravityTranscriptStep>(serde_json::json!({
++            "step_index": 2,
++            "source": "MODEL",
++            "type": "GREP_SEARCH",
++            "status": "DONE",
++            "content": "marker.txt:2:beta needle"
++        }))
++        .unwrap();
++        state.handle_step(result, &msg_store);
++
++        let entries = latest_normalized_entries(&msg_store);
++        let tool_entries = entries
++            .iter()
++            .filter(|entry| matches!(entry.entry_type, NormalizedEntryType::ToolUse { .. }))
++            .collect::<Vec<_>>();
++        assert_eq!(tool_entries.len(), 1);
++
++        match &tool_entries[0].entry_type {
++            NormalizedEntryType::ToolUse {
++                tool_name,
++                action_type: ActionType::Search { query },
++                status,
++            } => {
++                assert_eq!(tool_name, "grep_search");
++                assert_eq!(query, "needle");
++                assert!(matches!(status, ToolStatus::Success));
++            }
++            other => panic!("unexpected search tool entry: {other:?}"),
++        }
+     }
+ }
