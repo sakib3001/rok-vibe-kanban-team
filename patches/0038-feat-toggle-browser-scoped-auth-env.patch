@@ -1,0 +1,84 @@
+From 1a2b3c4d5e6f7g8h9i0j Mon Sep 17 00:00:00 2001
+From: Codex <codex@example.com>
+Date: Mon, 15 Jun 2026 00:00:00 +0000
+Subject: [PATCH] feat: allow toggling browser-scoped auth persistence
+
+---
+ crates/services/src/services/auth.rs | 23 ++++++++++++++++++-----
+ 1 file changed, 18 insertions(+), 5 deletions(-)
+
+diff --git a/crates/services/src/services/auth.rs b/crates/services/src/services/auth.rs
+index 1234567..89abcde 100644
+--- a/crates/services/src/services/auth.rs
++++ b/crates/services/src/services/auth.rs
+@@ -733,6 +733,7 @@ use super::oauth_credentials::{Credentials, OAuthCredentials};
+ 
+ const DEFAULT_AUTH_SESSION_ID: &str = "__default__";
++const VIBE_KANBAN_BROWSER_SCOPED_AUTH_ENV: &str = "VIBE_KANBAN_BROWSER_SCOPED_AUTH";
+ 
+ tokio::task_local! {
+     static AUTH_SESSION_ID: String;
+@@ -751,6 +752,7 @@ pub struct SessionState {
+ #[derive(Clone)]
+ pub struct AuthContext {
+     base_credentials_path: Arc<PathBuf>,
++    browser_scoped_auth: bool,
+     session_states: Arc<RwLock<HashMap<String, SessionState>>,
+ }
+ 
+ impl AuthContext {
+     pub fn new(base_credentials_path: PathBuf) -> Self {
+         Self {
+-            base_credentials_path: Arc::new(base_credentials_path),
++            base_credentials_path: Arc::new(base_credentials_path),
++            browser_scoped_auth: parse_bool_env(VIBE_KANBAN_BROWSER_SCOPED_AUTH_ENV).unwrap_or(true),
+             session_states: Arc::new(RwLock::new(HashMap::new())),
+         }
+     }
+@@ -891,10 +893,14 @@ impl AuthContext {
+ 
+         self.session_states.insert(session_id, state.clone());
+         state
+     }
+ 
+-    fn normalize_session_id(session_id: Option<&str>) -> String {
++    fn normalize_session_id(&self, session_id: Option<&str>) -> String {
++        if !self.browser_scoped_auth {
++            return DEFAULT_AUTH_SESSION_ID.to_string();
++        }
++
+         session_id
+             .map(str::trim)
+             .filter(|value| !value.is_empty())
+             .unwrap_or(DEFAULT_AUTH_SESSION_ID)
+             .to_string()
+@@ -915,7 +921,7 @@ impl AuthContext {
+             .base_credentials_path
+             .as_ref()
+             .parent()
+             .map(Path::to_path_buf)
+             .unwrap_or_else(|| PathBuf::from("."));
+@@ -925,7 +931,16 @@ impl AuthContext {
+ 
+     async fn session_state_for(&self, session_id: Option<&str>) -> SessionState {
+-        let session_id = Self::normalize_session_id(session_id);
++        let session_id = self.normalize_session_id(session_id);
+ 
+         if let Some(state) = self.session_states.read().await.get(&session_id).cloned() {
+             return state;
+         }
+@@ -944,3 +959,14 @@ impl AuthContext {
+         session_states.insert(session_id, state.clone());
+         state
+     }
+ }
++
++fn parse_bool_env(name: &str) -> Option<bool> {
++    let value = std::env::var(name).ok()?;
++
++    match value.trim().to_lowercase().as_str() {
++        "1" | "true" | "yes" | "on" => Some(true),
++        "0" | "false" | "no" | "off" => Some(false),
++        _ => None,
++    }
++}

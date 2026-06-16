@@ -234,10 +234,16 @@ data:
       VIBE_KANBAN_EDITOR_TYPE \
       VIBE_KANBAN_EDITOR \
       VIBE_KANBAN_CODE_SERVER_URL \
+      VIBE_KANBAN_BROWSER_SCOPED_AUTH \
       CODE_SERVER_URL \
       VIBE_KANBAN_BYPASS_ONBOARDING; do
       write_env_file_var "$VK_ENV_NAME"
     done
+    if [ -z "${VIBE_KANBAN_BROWSER_SCOPED_AUTH:-}" ]; then
+      if [ "{{ .Values.frontend.app.browserScopedAuth | toString | lower }}" = "false" ]; then
+        printf '%s=%q\n' "VIBE_KANBAN_BROWSER_SCOPED_AUTH" "false" >> /etc/default/vibe-kanban-env
+      fi
+    fi
     {{- if and .Values.frontend.codeServer.enabled $codeServerHost }}
     if [ -z "${VIBE_KANBAN_EDITOR_TYPE:-}" ] && [ -z "${VIBE_KANBAN_EDITOR:-}" ]; then
       printf '%s=%q\n' "VIBE_KANBAN_EDITOR_TYPE" "CODE_SERVER" >> /etc/default/vibe-kanban-env
@@ -279,10 +285,16 @@ data:
         VIBE_KANBAN_EDITOR_TYPE \
         VIBE_KANBAN_EDITOR \
         VIBE_KANBAN_CODE_SERVER_URL \
+        VIBE_KANBAN_BROWSER_SCOPED_AUTH \
         CODE_SERVER_URL \
         VIBE_KANBAN_BYPASS_ONBOARDING; do
         write_shell_export "$VK_ENV_NAME"
       done
+      if [ -z "${VIBE_KANBAN_BROWSER_SCOPED_AUTH:-}" ]; then
+        if [ "{{ .Values.frontend.app.browserScopedAuth | toString | lower }}" = "false" ]; then
+          printf '%s\n' 'export VIBE_KANBAN_BROWSER_SCOPED_AUTH="false"' >> "$RC_DIR/80-container-env.sh"
+        fi
+      fi
       {{- if and .Values.frontend.codeServer.enabled $codeServerHost }}
       if [ -z "${VIBE_KANBAN_EDITOR_TYPE:-}" ] && [ -z "${VIBE_KANBAN_EDITOR:-}" ]; then
         printf '%s\n' 'export VIBE_KANBAN_EDITOR_TYPE="CODE_SERVER"' >> "$RC_DIR/80-container-env.sh"

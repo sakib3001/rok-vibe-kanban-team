@@ -249,6 +249,7 @@ The frontend app can be preconfigured through env vars, including Coder workspac
 - `VIBE_KANBAN_EDITOR_TYPE=CODE_SERVER`
 - `VIBE_KANBAN_CODE_SERVER_URL=https://code.vk.example.com/` (`CODE_SERVER_URL` also works)
 - `VIBE_KANBAN_BYPASS_ONBOARDING=true`
+- `VIBE_KANBAN_BROWSER_SCOPED_AUTH=true|false` (default: `true`; set `false` to persist OAuth credentials in the shared file path instead of browser-specific sessions)
 
 ### 5. Deploy
 

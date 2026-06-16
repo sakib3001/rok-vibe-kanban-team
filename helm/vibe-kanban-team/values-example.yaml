@@ -168,6 +168,7 @@ frontend:
     command: "npx --yes vibe-kanban-team"
     workingDirectory: "/home/coder"
     bypassOnboarding: true
+    browserScopedAuth: true
 
   service:
     type: ClusterIP

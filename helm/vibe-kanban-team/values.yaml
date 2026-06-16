@@ -389,6 +389,10 @@ frontend:
     # Shared API base URL for the remote server
     # The frontend uses this to connect to the backend
     sharedApiBase: ""
+    # Keep authentication credentials scoped to each browser session (default).
+    # Set false to share a single credential file across browsers and survive
+    # sign-outs/sign-ins across sessions on this deployment.
+    browserScopedAuth: true
     # Sets VIBE_KANBAN_BYPASS_ONBOARDING=true for the app service.
     # You can also inject it through frontend.env/extraEnv.
     bypassOnboarding: false
