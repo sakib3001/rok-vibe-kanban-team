@@ -37,3 +37,4 @@
 0036-fix-keep-remote-lockfile-for-Docker-build.patch
 0037-fix-Antigravity-visible-text-and-workspace-cwd.patch
 0038-feat-toggle-browser-scoped-auth-env.patch
+0039-fix-Antigravity-follow-up-replay-and-labels.patch

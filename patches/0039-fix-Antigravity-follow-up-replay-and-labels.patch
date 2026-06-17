@@ -1,0 +1,246 @@
+diff --git a/crates/executors/src/executors/antigravity.rs b/crates/executors/src/executors/antigravity.rs
+index 3079514cd..2e7d0726f 100644
+--- a/crates/executors/src/executors/antigravity.rs
++++ b/crates/executors/src/executors/antigravity.rs
+@@ -11,6 +11,7 @@ use std::{
+ };
+ 
+ use async_trait::async_trait;
++use chrono::{DateTime, Utc};
+ use derivative::Derivative;
+ use futures::StreamExt;
+ use schemars::JsonSchema;
+@@ -403,6 +404,7 @@ fn normalize_logs(
+     let prompt_tokens = Arc::new(AtomicU32::new(0));
+     let transcript_assistant_message_seen = Arc::new(AtomicBool::new(false));
+     let worktree_path = worktree_path.canonicalize().unwrap_or(worktree_path);
++    let current_turn_started_at = Utc::now();
+ 
+     let stdout_handle = normalize_stdout_logs(
+         msg_store.clone(),
+@@ -419,6 +421,7 @@ fn normalize_logs(
+         antigravity_home,
+         worktree_path,
+         transcript_assistant_message_seen,
++        current_turn_started_at,
+     );
+ 
+     vec![stdout_handle, stderr_handle]
+@@ -480,6 +483,7 @@ fn normalize_stderr_logs(
+     antigravity_home: Option<PathBuf>,
+     worktree_path: PathBuf,
+     transcript_assistant_message_seen: Arc<AtomicBool>,
++    current_turn_started_at: DateTime<Utc>,
+ ) -> tokio::task::JoinHandle<()> {
+     tokio::spawn(async move {
+         let mut stderr = msg_store.stderr_chunked_stream();
+@@ -504,6 +508,7 @@ fn normalize_stderr_logs(
+                     antigravity_home.as_ref(),
+                     &worktree_path,
+                     &transcript_assistant_message_seen,
++                    current_turn_started_at,
+                     &mut stored_session_id,
+                 );
+             }
+@@ -521,6 +526,7 @@ fn normalize_stderr_logs(
+                 antigravity_home.as_ref(),
+                 &worktree_path,
+                 &transcript_assistant_message_seen,
++                current_turn_started_at,
+                 &mut stored_session_id,
+             );
+         }
+@@ -536,6 +542,7 @@ fn handle_stderr_line(
+     antigravity_home: Option<&PathBuf>,
+     worktree_path: &Path,
+     transcript_assistant_message_seen: &Arc<AtomicBool>,
++    current_turn_started_at: DateTime<Utc>,
+     stored_session_id: &mut bool,
+ ) {
+     let trimmed = line.trim();
+@@ -564,6 +571,7 @@ fn handle_stderr_line(
+                     transcript_path,
+                     worktree_path.to_path_buf(),
+                     transcript_assistant_message_seen.clone(),
++                    current_turn_started_at,
+                 ));
+             }
+         }
+@@ -623,6 +631,7 @@ struct AntigravityTranscriptState {
+     output_chars: usize,
+     assistant_message_added: bool,
+     token_usage_added: bool,
++    current_turn_started_at: DateTime<Utc>,
+ }
+ 
+ impl AntigravityTranscriptState {
+@@ -632,6 +641,7 @@ impl AntigravityTranscriptState {
+         context_window: u32,
+         worktree_path: PathBuf,
+         transcript_assistant_message_seen: Arc<AtomicBool>,
++        current_turn_started_at: DateTime<Utc>,
+     ) -> Self {
+         Self {
+             entry_index,
+@@ -643,6 +653,7 @@ impl AntigravityTranscriptState {
+             output_chars: 0,
+             assistant_message_added: false,
+             token_usage_added: false,
++            current_turn_started_at,
+         }
+     }
+ 
+@@ -686,6 +697,16 @@ impl AntigravityTranscriptState {
+             step.step_type.as_str(),
+             "USER_INPUT" | "CONVERSATION_HISTORY" | "EPHEMERAL_MESSAGE" | "SYSTEM_MESSAGE"
+         ) || matches!(step.source.as_deref(), Some("USER_EXPLICIT"))
++            || self.is_previous_turn_step(step)
++    }
++
++    fn is_previous_turn_step(&self, step: &AntigravityTranscriptStep) -> bool {
++        let Some(created_at) = step.created_at.as_deref() else {
++            return false;
++        };
++        DateTime::parse_from_rfc3339(created_at)
++            .map(|timestamp| timestamp.with_timezone(&Utc) < self.current_turn_started_at)
++            .unwrap_or(false)
+     }
+ 
+     fn handle_tool_call(
+@@ -878,6 +899,7 @@ async fn tail_antigravity_transcript(
+     transcript_path: PathBuf,
+     worktree_path: PathBuf,
+     transcript_assistant_message_seen: Arc<AtomicBool>,
++    current_turn_started_at: DateTime<Utc>,
+ ) {
+     let mut state = AntigravityTranscriptState::new(
+         entry_index,
+@@ -885,6 +907,7 @@ async fn tail_antigravity_transcript(
+         context_window,
+         worktree_path,
+         transcript_assistant_message_seen,
++        current_turn_started_at,
+     );
+     let mut processed_steps = HashSet::new();
+     let mut msg_stream = msg_store.history_plus_stream();
+@@ -1525,6 +1548,9 @@ mod tests {
+             DEFAULT_ANTIGRAVITY_CONTEXT_WINDOW,
+             PathBuf::from("/repo"),
+             assistant_seen,
++            DateTime::parse_from_rfc3339("2026-06-13T23:59:59Z")
++                .unwrap()
++                .with_timezone(&Utc),
+         );
+ 
+         let planner = serde_json::from_value::<AntigravityTranscriptStep>(serde_json::json!({
+@@ -1628,6 +1654,9 @@ mod tests {
+             DEFAULT_ANTIGRAVITY_CONTEXT_WINDOW,
+             PathBuf::from("/repo"),
+             Arc::new(AtomicBool::new(false)),
++            DateTime::parse_from_rfc3339("2026-06-13T23:59:59Z")
++                .unwrap()
++                .with_timezone(&Utc),
+         );
+ 
+         let planner = serde_json::from_value::<AntigravityTranscriptStep>(serde_json::json!({
+@@ -1677,4 +1706,48 @@ mod tests {
+             other => panic!("unexpected search tool entry: {other:?}"),
+         }
+     }
++
++    #[test]
++    fn transcript_skips_previous_turn_steps_on_resume() {
++        let msg_store = Arc::new(MsgStore::new());
++        let mut state = AntigravityTranscriptState::new(
++            EntryIndexProvider::test_new(),
++            Arc::new(AtomicU32::new(0)),
++            DEFAULT_ANTIGRAVITY_CONTEXT_WINDOW,
++            PathBuf::from("/repo"),
++            Arc::new(AtomicBool::new(false)),
++            DateTime::parse_from_rfc3339("2026-06-14T00:01:00Z")
++                .unwrap()
++                .with_timezone(&Utc),
++        );
++
++        let previous_turn = serde_json::from_value::<AntigravityTranscriptStep>(serde_json::json!({
++            "step_index": 1,
++            "source": "MODEL",
++            "type": "PLANNER_RESPONSE",
++            "status": "DONE",
++            "created_at": "2026-06-14T00:00:00Z",
++            "content": "old answer"
++        }))
++        .unwrap();
++        state.handle_step(previous_turn, &msg_store);
++
++        let current_turn = serde_json::from_value::<AntigravityTranscriptStep>(serde_json::json!({
++            "step_index": 2,
++            "source": "MODEL",
++            "type": "PLANNER_RESPONSE",
++            "status": "DONE",
++            "created_at": "2026-06-14T00:01:01Z",
++            "content": "new answer"
++        }))
++        .unwrap();
++        state.handle_step(current_turn, &msg_store);
++
++        let assistant_messages = latest_normalized_entries(&msg_store)
++            .iter()
++            .filter(|entry| matches!(entry.entry_type, NormalizedEntryType::AssistantMessage))
++            .map(|entry| entry.content.clone())
++            .collect::<Vec<_>>();
++        assert_eq!(assistant_messages, vec!["new answer"]);
++    }
+ }
+diff --git a/packages/web-core/src/shared/components/tasks/AgentSelector.tsx b/packages/web-core/src/shared/components/tasks/AgentSelector.tsx
+index f9928304c..4d37579fa 100644
+--- a/packages/web-core/src/shared/components/tasks/AgentSelector.tsx
++++ b/packages/web-core/src/shared/components/tasks/AgentSelector.tsx
+@@ -7,6 +7,7 @@ import {
+   DropdownMenuTrigger,
+ } from '@vibe/ui/components/DropdownMenu';
+ import { Label } from '@vibe/ui/components/Label';
++import { getAgentName } from '@/shared/components/AgentIcon';
+ import type { ExecutorProfileId, BaseCodingAgent } from 'shared/types';
+ 
+ interface AgentSelectorProps {
+@@ -51,7 +52,7 @@ export function AgentSelector({
+           >
+             <div className="flex items-center gap-1.5 w-full">
+               <Bot className="h-3 w-3" />
+-              <span className="truncate">{selectedAgent || 'Agent'}</span>
++              <span className="truncate">{getAgentName(selectedAgent)}</span>
+             </div>
+             <ArrowDown className="h-3 w-3" />
+           </Button>
+@@ -73,7 +74,7 @@ export function AgentSelector({
+                 }}
+                 className={selectedAgent === agent ? 'bg-accent' : ''}
+               >
+-                {agent}
++                {getAgentName(agent)}
+               </DropdownMenuItem>
+             ))
+           )}
+diff --git a/packages/web-core/src/shared/dialogs/settings/settings/AgentsSettingsSection.tsx b/packages/web-core/src/shared/dialogs/settings/settings/AgentsSettingsSection.tsx
+index 4e8c00e2d..595a2dd0d 100644
+--- a/packages/web-core/src/shared/dialogs/settings/settings/AgentsSettingsSection.tsx
++++ b/packages/web-core/src/shared/dialogs/settings/settings/AgentsSettingsSection.tsx
+@@ -31,7 +31,7 @@ import {
+ } from './SettingsComponents';
+ import { useSettingsDirty } from './SettingsDirtyContext';
+ import { useSettingsMachineClient } from './SettingsHostContext';
+-import { AgentIcon } from '@/shared/components/AgentIcon';
++import { AgentIcon, getAgentName } from '@/shared/components/AgentIcon';
+ import { getExecutorVariantKeys } from '@/shared/lib/executor';
+ 
+ type ExecutorsMap = Record<string, Record<string, Record<string, unknown>>>;
+@@ -418,7 +418,7 @@ export function AgentsSettingsSection() {
+                       )
+                     }
+                   >
+-                    {toPrettyCase(executor)}
++                    {getAgentName(executor as BaseCodingAgent)}
+                   </TwoColumnPickerItem>
+                 );
+               })}
