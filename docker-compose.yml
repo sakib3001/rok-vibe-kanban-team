@@ -1,0 +1,191 @@
+# Centralized Vibe Kanban — Docker Compose (remote-only, local npx client model)
+#
+# Services: postgres + electric (real-time sync) + remote (API) + caddy (TLS).
+# Developers connect with: npx @yourorg/vibe-kanban-team  (pointed at PUBLIC_DOMAIN)
+# The browser "frontend pod" (sysbox/code-server) is intentionally NOT included —
+# it requires the sysbox runtime and is k8s-only. See ../SYSTEM_DESIGN.md §8.
+#
+# Env values come from .env (copy .env.example -> .env first).
+
+name: vibe-kanban-team
+
+x-restart: &restart
+  restart: unless-stopped
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL — source of truth. wal_level=logical is REQUIRED for ElectricSQL.
+  # The remote service migrations create/manage the electric_sync role.
+  # ---------------------------------------------------------------------------
+  postgres:
+    <<: *restart
+    image: postgres:16-alpine
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+      - -c
+      - max_wal_senders=10
+      - -c
+      - max_replication_slots=10
+    environment:
+      POSTGRES_USER: remote
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: remote
+      # Shared with remote/electric for migration and sync setup.
+      ELECTRIC_ROLE_PASSWORD: ${ELECTRIC_ROLE_PASSWORD:?set ELECTRIC_ROLE_PASSWORD in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U remote -d remote"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [internal]
+
+  # ---------------------------------------------------------------------------
+  # Remote Server — auth, orgs, projects, issues, assignment, API.
+  # Runs DB migrations on startup, then serves on :8081. Proxies sync to electric.
+  # ---------------------------------------------------------------------------
+  remote:
+    <<: *restart
+    image: ${REMOTE_IMAGE:-vibe-kanban-team-remote}:${IMAGE_TAG:-local}
+    # Build from the patched upstream source. Run ./build.sh first (it applies the
+    # patch stack), then `docker compose build remote` or `./build.sh` builds this.
+    build:
+      context: ${VK_DIR:-./vibe-kanban}
+      dockerfile: crates/remote/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      RUST_LOG: info
+      SERVER_LISTEN_ADDR: 0.0.0.0:8081
+      SERVER_DATABASE_URL: postgres://remote:${POSTGRES_PASSWORD}@postgres:5432/remote
+      VIBEKANBAN_REMOTE_JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+      ELECTRIC_ROLE_PASSWORD: ${ELECTRIC_ROLE_PASSWORD}
+      ELECTRIC_URL: http://electric:3000
+      # Public base URL (override with SERVER_PUBLIC_BASE_URL for local Phase 0 tests):
+      SERVER_PUBLIC_BASE_URL: ${SERVER_PUBLIC_BASE_URL:-https://${PUBLIC_DOMAIN:?set PUBLIC_DOMAIN in .env}}
+      # Restrict sign-in to your company domain(s), comma-separated. Leave empty to allow all.
+      ALLOWED_EMAIL_DOMAINS: ${ALLOWED_EMAIL_DOMAINS:-}
+      # --- Pick AT LEAST ONE OAuth provider (set the matching pair in .env) ---
+      GITHUB_OAUTH_CLIENT_ID: ${GITHUB_OAUTH_CLIENT_ID:-}
+      GITHUB_OAUTH_CLIENT_SECRET: ${GITHUB_OAUTH_CLIENT_SECRET:-}
+      GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID:-}
+      GOOGLE_OAUTH_CLIENT_SECRET: ${GOOGLE_OAUTH_CLIENT_SECRET:-}
+      ZOHO_OAUTH_CLIENT_ID: ${ZOHO_OAUTH_CLIENT_ID:-}
+      ZOHO_OAUTH_CLIENT_SECRET: ${ZOHO_OAUTH_CLIENT_SECRET:-}
+      # Phase 0 local validation fallback when OAuth apps are not configured.
+      SELF_HOST_LOCAL_AUTH_EMAIL: ${SELF_HOST_LOCAL_AUTH_EMAIL:-}
+      SELF_HOST_LOCAL_AUTH_PASSWORD: ${SELF_HOST_LOCAL_AUTH_PASSWORD:-}
+      # Optional (Phase 2): set to send org invitation emails; empty = invite-link sharing only.
+      LOOPS_EMAIL_API_KEY: ${LOOPS_EMAIL_API_KEY:-}
+    networks: [internal]
+
+  # ---------------------------------------------------------------------------
+  # electric-init — mirrors the Helm initContainer: wait until the remote server
+  # has finished DB migrations before starting Electric.
+  # ---------------------------------------------------------------------------
+  electric-init:
+    image: busybox:1.36
+    depends_on:
+      remote:
+        condition: service_started
+    command:
+      - sh
+      - -c
+      - |
+        echo "Waiting for Vibe Kanban remote to finish migrations..."
+        until wget -q --spider http://remote:8081/health 2>/dev/null; do
+          echo "remote not ready, retrying in 5s..."; sleep 5
+        done
+        echo "remote ready — migrations complete."
+    networks: [internal]
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
+  # ElectricSQL — streams Postgres changes to clients (real-time sync).
+  # Internal-only: clients reach it THROUGH the remote server, not directly.
+  # ---------------------------------------------------------------------------
+  electric:
+    <<: *restart
+    image: electricsql/electric:${ELECTRIC_TAG:-1.3.3}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      electric-init:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgresql://electric_sync:${ELECTRIC_ROLE_PASSWORD}@postgres:5432/remote?sslmode=disable
+      PG_PROXY_PORT: "65432"
+      LOGICAL_PUBLISHER_HOST: electric
+      AUTH_MODE: insecure
+      ELECTRIC_INSECURE: "true"
+      ELECTRIC_MANUAL_TABLE_PUBLISHING: "true"
+      ELECTRIC_USAGE_REPORTING: "false"
+      ELECTRIC_FEATURE_FLAGS: "allow_subqueries,tagged_subqueries"
+    networks: [internal]
+
+  # ---------------------------------------------------------------------------
+  # Ingest — OPTIONAL issue-ingestion API. POST /ingest/issues -> auto-create.
+  # Enable with: docker compose --profile ingest up -d
+  # Requires INGEST_* vars in .env and a service account in the team org.
+  # ---------------------------------------------------------------------------
+  ingest:
+    <<: *restart
+    build: ./ingest
+    image: vibe-kanban-ingest:local
+    profiles: ["ingest"]
+    depends_on:
+      remote:
+        condition: service_healthy
+    environment:
+      INGEST_PORT: "8090"
+      REMOTE_URL: http://remote:8081
+      # Optional interpolation (:-) so the base stack never fails to parse when
+      # ingest is unused. The sidecar validates these at startup and exits with
+      # a clear message if any are missing.
+      INGEST_API_KEY: ${INGEST_API_KEY:-}
+      INGEST_SVC_EMAIL: ${INGEST_SVC_EMAIL:-}
+      INGEST_SVC_PASSWORD: ${INGEST_SVC_PASSWORD:-}
+      INGEST_PROJECT_ID: ${INGEST_PROJECT_ID:-}
+      INGEST_ORG_ID: ${INGEST_ORG_ID:-}
+      INGEST_STATUS_ID: ${INGEST_STATUS_ID:-}
+      INGEST_STATUS_NAME: ${INGEST_STATUS_NAME:-todo}
+      INGEST_PUBLIC_URL: ${INGEST_PUBLIC_URL:-https://${PUBLIC_DOMAIN}}
+      INGEST_DEDUP_FILE: /data/dedup.json
+    volumes:
+      - ingest_data:/data
+    networks: [internal]
+
+  # ---------------------------------------------------------------------------
+  # Caddy — TLS termination + reverse proxy. Automatic Let's Encrypt certs.
+  # Only the remote API is exposed publicly; electric stays internal.
+  # ---------------------------------------------------------------------------
+  caddy:
+    <<: *restart
+    image: caddy:2
+    depends_on:
+      - remote
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      PUBLIC_DOMAIN: ${PUBLIC_DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL in .env}
+    volumes:
+      - ./${CADDYFILE_PATH:-Caddyfile}:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [internal]
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:
+  ingest_data:
+
+networks:
+  internal:
+    driver: bridge

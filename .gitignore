@@ -1,12 +1,6 @@
-# Helm
-helm/vibe-kanban-team/charts/
+# Build artifacts
 *.tgz
-
-# Values files with secrets
-values-production.yaml
-values-*.local.yaml
-*-secrets.yaml
-k8s/cnpg/*-secret.yaml
+remote-web-dist/
 
 # Environment files
 .env
@@ -23,10 +17,6 @@ k8s/cnpg/*-secret.yaml
 # OS
 .DS_Store
 Thumbs.db
-
-# Kubernetes
-kubeconfig
-*.kubeconfig
 
 # Logs
 *.log
