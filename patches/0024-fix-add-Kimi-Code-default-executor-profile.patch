@@ -1,0 +1,50 @@
+From b00f33e479f96db3872c7d5a6872a40d7e3ac483 Mon Sep 17 00:00:00 2001
+From: Riajul Islam <kmriajulislami@gmail.com>
+Date: Sun, 24 May 2026 12:13:37 +0600
+Subject: [PATCH] fix: add Kimi Code default executor profile
+
+---
+ crates/executors/default_profiles.json |  7 +++++++
+ crates/executors/src/profile.rs        | 14 ++++++++++++++
+ 2 files changed, 21 insertions(+)
+
+diff --git a/crates/executors/default_profiles.json b/crates/executors/default_profiles.json
+index 3a95f74b4..70356c477 100644
+--- a/crates/executors/default_profiles.json
++++ b/crates/executors/default_profiles.json
+@@ -42,6 +42,13 @@
+         }
+       }
+     },
++    "KIMI_CODE": {
++      "DEFAULT": {
++        "KIMI_CODE": {
++          "yolo": true
++        }
++      }
++    },
+     "CURSOR_AGENT": {
+       "DEFAULT": {
+         "CURSOR_AGENT": {
+diff --git a/crates/executors/src/profile.rs b/crates/executors/src/profile.rs
+index 987b25c90..a46710680 100644
+--- a/crates/executors/src/profile.rs
++++ b/crates/executors/src/profile.rs
+@@ -556,3 +556,17 @@ impl ExecutorConfigs {
+         Ok(ExecutorProfileId::new(selected))
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn defaults_include_kimi_code_profile() {
++        let defaults = ExecutorConfigs::from_defaults();
++        let profile_id = ExecutorProfileId::new(BaseCodingAgent::KimiCode);
++
++        assert!(defaults.get_coding_agent(&profile_id).is_some());
++        assert!(defaults.executors.contains_key(&BaseCodingAgent::KimiCode));
++    }
++}

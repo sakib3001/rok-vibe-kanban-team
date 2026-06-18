@@ -1,0 +1,28 @@
+# Caddy reverse proxy for centralized Vibe Kanban (remote-only model).
+# Automatic HTTPS via Let's Encrypt using ACME_EMAIL.
+#
+# Only the remote API is public. ElectricSQL is internal — clients sync THROUGH
+# the remote server, so it never needs a public route.
+
+{
+	email {$ACME_EMAIL}
+}
+
+{$PUBLIC_DOMAIN} {
+	# Issue-ingestion API (only when `--profile ingest` is running).
+	handle /ingest/* {
+		reverse_proxy ingest:8090
+	}
+
+	# Everything else -> remote API. Stream-friendly (ElectricSQL sync is SSE).
+	handle {
+		reverse_proxy remote:8081 {
+			flush_interval -1
+		}
+	}
+
+}
+
+# --- LOCAL DEV (no public domain / no real certs) ----------------------------
+# For localhost-only testing use CADDYFILE_PATH=Caddyfile.local in .env.
+# -----------------------------------------------------------------------------

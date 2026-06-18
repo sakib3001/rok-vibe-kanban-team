@@ -1,0 +1,684 @@
+From caca2c79a47c637ab6b4efdd02a910c5b57d2df4 Mon Sep 17 00:00:00 2001
+From: Riajul Islam <riajul@kahf.co>
+Date: Tue, 14 Apr 2026 06:27:05 +0000
+Subject: [PATCH] downstream:
+ 0006-feat-fix-standalone-workspace-ownership-for-multi-us
+
+---
+ ...538cb04c1a36d8f6e78f962fce21f403bcc1.json} |  14 +-
+ ...111ffc613dae90b1c3d5179ce7ba90efd446.json} |  12 +-
+ ...23e7fb85b67c5aa8e9166c42d6a82d31cfed.json} |  14 +-
+ ...db8c36601c838306c6dddbd52265e1bd7946.json} |  14 +-
+ ...9a3093c96787bc4926876d73d1c0d8da072d.json} |  10 +-
+ ...bdde8170de2aa67e648faa3eb319c8ab216a.json} |  12 +-
+ ...682ede8465302e4f67ff72be99303315a4c2.json} |  12 +-
+ ...000000_add_owner_user_id_to_workspaces.sql |   2 +
+ crates/db/src/models/workspace.rs             |  28 ++--
+ crates/server/src/routes/workspaces/create.rs |  10 ++
+ crates/server/src/routes/workspaces/pr.rs     |   1 +
+ .../workspaces/WorkspacesSidebarContainer.tsx | 126 ++----------------
+ .../src/shared/hooks/useWorkspaces.ts         |   2 +
+ shared/types.ts                               |   4 +-
+ 14 files changed, 113 insertions(+), 148 deletions(-)
+ rename crates/db/.sqlx/{query-7410e8128e63af1c3127e833accee637e65f7efcd9111ecb891587294042129c.json => query-1da339ff150cd6af3a8a90f1a553538cb04c1a36d8f6e78f962fce21f403bcc1.json} (67%)
+ rename crates/db/.sqlx/{query-766fa107de23b7e6c579223b083d916e252d422e2908c27f6718fcbd851de2c1.json => query-304c825605da8f74b3f0134534aa111ffc613dae90b1c3d5179ce7ba90efd446.json} (86%)
+ rename crates/db/.sqlx/{query-592656b17a5f78d117365909e47afba7d3df545ac1078c307c6b968e75c8e2ba.json => query-5aeb6c1ab748cddf3114d9c882e723e7fb85b67c5aa8e9166c42d6a82d31cfed.json} (62%)
+ rename crates/db/.sqlx/{query-5154289c5a9ddbc061d42de2baf129e03a75061b8b305110921688f01d112de1.json => query-7022ab4f602d64aa2dbfe8d42edfdb8c36601c838306c6dddbd52265e1bd7946.json} (62%)
+ rename crates/db/.sqlx/{query-91810eeed4804827717a182ad1b61c641648e2659100f43ef9504fc60e5d244e.json => query-a1393d0ae8411439f7bed0c9e3bd9a3093c96787bc4926876d73d1c0d8da072d.json} (56%)
+ rename crates/db/.sqlx/{query-64f31710ab7ba14047f31cce44ad36c60a53624f9bcb03a5eaff5d61ca8cc9cf.json => query-f01fb4602cd83d441cb897e058ccbdde8170de2aa67e648faa3eb319c8ab216a.json} (83%)
+ rename crates/db/.sqlx/{query-f2dbb49b2f839e84a46fdd865d9982b758160517b93bc92d8e12060426daa05d.json => query-f2ee85153d3e9424aa0d8666be1d682ede8465302e4f67ff72be99303315a4c2.json} (85%)
+ create mode 100644 crates/db/migrations/20260318000000_add_owner_user_id_to_workspaces.sql
+
+diff --git a/crates/db/.sqlx/query-7410e8128e63af1c3127e833accee637e65f7efcd9111ecb891587294042129c.json b/crates/db/.sqlx/query-1da339ff150cd6af3a8a90f1a553538cb04c1a36d8f6e78f962fce21f403bcc1.json
+similarity index 67%
+rename from crates/db/.sqlx/query-7410e8128e63af1c3127e833accee637e65f7efcd9111ecb891587294042129c.json
+rename to crates/db/.sqlx/query-1da339ff150cd6af3a8a90f1a553538cb04c1a36d8f6e78f962fce21f403bcc1.json
+index de5161171..1f296e5d7 100644
+--- a/crates/db/.sqlx/query-7410e8128e63af1c3127e833accee637e65f7efcd9111ecb891587294042129c.json
++++ b/crates/db/.sqlx/query-1da339ff150cd6af3a8a90f1a553538cb04c1a36d8f6e78f962fce21f403bcc1.json
+@@ -1,6 +1,6 @@
+ {
+   "db_name": "SQLite",
+-  "query": "INSERT INTO workspaces (id, task_id, container_ref, branch, setup_completed_at, name)\n               VALUES ($1, $2, $3, $4, $5, $6)\n               RETURNING id as \"id!: Uuid\", task_id as \"task_id: Uuid\", container_ref, branch, setup_completed_at as \"setup_completed_at: DateTime<Utc>\", created_at as \"created_at!: DateTime<Utc>\", updated_at as \"updated_at!: DateTime<Utc>\", archived as \"archived!: bool\", pinned as \"pinned!: bool\", name, worktree_deleted as \"worktree_deleted!: bool\"",
++  "query": "INSERT INTO workspaces (id, task_id, container_ref, branch, setup_completed_at, name, owner_user_id)\n               VALUES ($1, $2, $3, $4, $5, $6, $7)\n               RETURNING id as \"id!: Uuid\", task_id as \"task_id: Uuid\", container_ref, branch, setup_completed_at as \"setup_completed_at: DateTime<Utc>\", created_at as \"created_at!: DateTime<Utc>\", updated_at as \"updated_at!: DateTime<Utc>\", archived as \"archived!: bool\", pinned as \"pinned!: bool\", name, worktree_deleted as \"worktree_deleted!: bool\", owner_user_id",
+   "describe": {
+     "columns": [
+       {
+@@ -57,10 +57,15 @@
+         "name": "worktree_deleted!: bool",
+         "ordinal": 10,
+         "type_info": "Bool"
++      },
++      {
++        "name": "owner_user_id",
++        "ordinal": 11,
++        "type_info": "Text"
+       }
+     ],
+     "parameters": {
+-      "Right": 6
++      "Right": 7
+     },
+     "nullable": [
+       true,
+@@ -73,8 +78,9 @@
+       false,
+       false,
+       true,
+-      false
++      false,
++      true
+     ]
+   },
+-  "hash": "7410e8128e63af1c3127e833accee637e65f7efcd9111ecb891587294042129c"
++  "hash": "1da339ff150cd6af3a8a90f1a553538cb04c1a36d8f6e78f962fce21f403bcc1"
+ }
+diff --git a/crates/db/.sqlx/query-766fa107de23b7e6c579223b083d916e252d422e2908c27f6718fcbd851de2c1.json b/crates/db/.sqlx/query-304c825605da8f74b3f0134534aa111ffc613dae90b1c3d5179ce7ba90efd446.json
+similarity index 86%
+rename from crates/db/.sqlx/query-766fa107de23b7e6c579223b083d916e252d422e2908c27f6718fcbd851de2c1.json
+rename to crates/db/.sqlx/query-304c825605da8f74b3f0134534aa111ffc613dae90b1c3d5179ce7ba90efd446.json
+index d77d242dd..7c86e06b8 100644
+--- a/crates/db/.sqlx/query-766fa107de23b7e6c579223b083d916e252d422e2908c27f6718fcbd851de2c1.json
++++ b/crates/db/.sqlx/query-304c825605da8f74b3f0134534aa111ffc613dae90b1c3d5179ce7ba90efd446.json
+@@ -1,6 +1,6 @@
+ {
+   "db_name": "SQLite",
+-  "query": "SELECT  id                AS \"id!: Uuid\",\n                       task_id           AS \"task_id: Uuid\",\n                       container_ref,\n                       branch,\n                       setup_completed_at AS \"setup_completed_at: DateTime<Utc>\",\n                       created_at        AS \"created_at!: DateTime<Utc>\",\n                       updated_at        AS \"updated_at!: DateTime<Utc>\",\n                       archived          AS \"archived!: bool\",\n                       pinned            AS \"pinned!: bool\",\n                       name,\n                       worktree_deleted  AS \"worktree_deleted!: bool\"\n               FROM    workspaces\n               WHERE   id = $1",
++  "query": "SELECT  id                AS \"id!: Uuid\",\n                       task_id           AS \"task_id: Uuid\",\n                       container_ref,\n                       branch,\n                       setup_completed_at AS \"setup_completed_at: DateTime<Utc>\",\n                       created_at        AS \"created_at!: DateTime<Utc>\",\n                       updated_at        AS \"updated_at!: DateTime<Utc>\",\n                       archived          AS \"archived!: bool\",\n                       pinned            AS \"pinned!: bool\",\n                       name,\n                       worktree_deleted  AS \"worktree_deleted!: bool\",\n                       owner_user_id\n               FROM    workspaces\n               WHERE   id = $1",
+   "describe": {
+     "columns": [
+       {
+@@ -57,6 +57,11 @@
+         "name": "worktree_deleted!: bool",
+         "ordinal": 10,
+         "type_info": "Bool"
++      },
++      {
++        "name": "owner_user_id",
++        "ordinal": 11,
++        "type_info": "Text"
+       }
+     ],
+     "parameters": {
+@@ -73,8 +78,9 @@
+       false,
+       false,
+       true,
+-      false
++      false,
++      true
+     ]
+   },
+-  "hash": "766fa107de23b7e6c579223b083d916e252d422e2908c27f6718fcbd851de2c1"
++  "hash": "304c825605da8f74b3f0134534aa111ffc613dae90b1c3d5179ce7ba90efd446"
+ }
+diff --git a/crates/db/.sqlx/query-592656b17a5f78d117365909e47afba7d3df545ac1078c307c6b968e75c8e2ba.json b/crates/db/.sqlx/query-5aeb6c1ab748cddf3114d9c882e723e7fb85b67c5aa8e9166c42d6a82d31cfed.json
+similarity index 62%
+rename from crates/db/.sqlx/query-592656b17a5f78d117365909e47afba7d3df545ac1078c307c6b968e75c8e2ba.json
+rename to crates/db/.sqlx/query-5aeb6c1ab748cddf3114d9c882e723e7fb85b67c5aa8e9166c42d6a82d31cfed.json
+index 41ccc26e1..0327fb0b6 100644
+--- a/crates/db/.sqlx/query-592656b17a5f78d117365909e47afba7d3df545ac1078c307c6b968e75c8e2ba.json
++++ b/crates/db/.sqlx/query-5aeb6c1ab748cddf3114d9c882e723e7fb85b67c5aa8e9166c42d6a82d31cfed.json
+@@ -1,6 +1,6 @@
+ {
+   "db_name": "SQLite",
+-  "query": "SELECT\n                w.id AS \"id!: Uuid\",\n                w.task_id AS \"task_id: Uuid\",\n                w.container_ref,\n                w.branch,\n                w.setup_completed_at AS \"setup_completed_at: DateTime<Utc>\",\n                w.created_at AS \"created_at!: DateTime<Utc>\",\n                w.updated_at AS \"updated_at!: DateTime<Utc>\",\n                w.archived AS \"archived!: bool\",\n                w.pinned AS \"pinned!: bool\",\n                w.name,\n                w.worktree_deleted AS \"worktree_deleted!: bool\",\n\n                CASE WHEN EXISTS (\n                    SELECT 1\n                    FROM sessions s\n                    JOIN execution_processes ep ON ep.session_id = s.id\n                    WHERE s.workspace_id = w.id\n                      AND ep.status = 'running'\n                      AND ep.run_reason IN ('setupscript','cleanupscript','codingagent')\n                    LIMIT 1\n                ) THEN 1 ELSE 0 END AS \"is_running!: i64\",\n\n                CASE WHEN (\n                    SELECT ep.status\n                    FROM sessions s\n                    JOIN execution_processes ep ON ep.session_id = s.id\n                    WHERE s.workspace_id = w.id\n                      AND ep.run_reason IN ('setupscript','cleanupscript','codingagent')\n                    ORDER BY ep.created_at DESC\n                    LIMIT 1\n                ) IN ('failed','killed') THEN 1 ELSE 0 END AS \"is_errored!: i64\"\n\n            FROM workspaces w\n            WHERE w.id = $1",
++  "query": "SELECT\n                w.id AS \"id!: Uuid\",\n                w.task_id AS \"task_id: Uuid\",\n                w.container_ref,\n                w.branch,\n                w.setup_completed_at AS \"setup_completed_at: DateTime<Utc>\",\n                w.created_at AS \"created_at!: DateTime<Utc>\",\n                w.updated_at AS \"updated_at!: DateTime<Utc>\",\n                w.archived AS \"archived!: bool\",\n                w.pinned AS \"pinned!: bool\",\n                w.name,\n                w.worktree_deleted AS \"worktree_deleted!: bool\",\n                w.owner_user_id,\n\n                CASE WHEN EXISTS (\n                    SELECT 1\n                    FROM sessions s\n                    JOIN execution_processes ep ON ep.session_id = s.id\n                    WHERE s.workspace_id = w.id\n                      AND ep.status = 'running'\n                      AND ep.run_reason IN ('setupscript','cleanupscript','codingagent')\n                    LIMIT 1\n                ) THEN 1 ELSE 0 END AS \"is_running!: i64\",\n\n                CASE WHEN (\n                    SELECT ep.status\n                    FROM sessions s\n                    JOIN execution_processes ep ON ep.session_id = s.id\n                    WHERE s.workspace_id = w.id\n                      AND ep.run_reason IN ('setupscript','cleanupscript','codingagent')\n                    ORDER BY ep.created_at DESC\n                    LIMIT 1\n                ) IN ('failed','killed') THEN 1 ELSE 0 END AS \"is_errored!: i64\"\n\n            FROM workspaces w\n            WHERE w.id = $1",
+   "describe": {
+     "columns": [
+       {
+@@ -59,13 +59,18 @@
+         "type_info": "Bool"
+       },
+       {
+-        "name": "is_running!: i64",
++        "name": "owner_user_id",
+         "ordinal": 11,
++        "type_info": "Text"
++      },
++      {
++        "name": "is_running!: i64",
++        "ordinal": 12,
+         "type_info": "Null"
+       },
+       {
+         "name": "is_errored!: i64",
+-        "ordinal": 12,
++        "ordinal": 13,
+         "type_info": "Null"
+       }
+     ],
+@@ -84,9 +89,10 @@
+       false,
+       true,
+       false,
++      true,
+       null,
+       null
+     ]
+   },
+-  "hash": "592656b17a5f78d117365909e47afba7d3df545ac1078c307c6b968e75c8e2ba"
++  "hash": "5aeb6c1ab748cddf3114d9c882e723e7fb85b67c5aa8e9166c42d6a82d31cfed"
+ }
+diff --git a/crates/db/.sqlx/query-5154289c5a9ddbc061d42de2baf129e03a75061b8b305110921688f01d112de1.json b/crates/db/.sqlx/query-7022ab4f602d64aa2dbfe8d42edfdb8c36601c838306c6dddbd52265e1bd7946.json
+similarity index 62%
+rename from crates/db/.sqlx/query-5154289c5a9ddbc061d42de2baf129e03a75061b8b305110921688f01d112de1.json
+rename to crates/db/.sqlx/query-7022ab4f602d64aa2dbfe8d42edfdb8c36601c838306c6dddbd52265e1bd7946.json
+index c0f448d0f..2ae4148ef 100644
+--- a/crates/db/.sqlx/query-5154289c5a9ddbc061d42de2baf129e03a75061b8b305110921688f01d112de1.json
++++ b/crates/db/.sqlx/query-7022ab4f602d64aa2dbfe8d42edfdb8c36601c838306c6dddbd52265e1bd7946.json
+@@ -1,6 +1,6 @@
+ {
+   "db_name": "SQLite",
+-  "query": "SELECT\n                w.id AS \"id!: Uuid\",\n                w.task_id AS \"task_id: Uuid\",\n                w.container_ref,\n                w.branch,\n                w.setup_completed_at AS \"setup_completed_at: DateTime<Utc>\",\n                w.created_at AS \"created_at!: DateTime<Utc>\",\n                w.updated_at AS \"updated_at!: DateTime<Utc>\",\n                w.archived AS \"archived!: bool\",\n                w.pinned AS \"pinned!: bool\",\n                w.name,\n                w.worktree_deleted AS \"worktree_deleted!: bool\",\n\n                CASE WHEN EXISTS (\n                    SELECT 1\n                    FROM sessions s\n                    JOIN execution_processes ep ON ep.session_id = s.id\n                    WHERE s.workspace_id = w.id\n                      AND ep.status = 'running'\n                      AND ep.run_reason IN ('setupscript','cleanupscript','codingagent')\n                    LIMIT 1\n                ) THEN 1 ELSE 0 END AS \"is_running!: i64\",\n\n                CASE WHEN (\n                    SELECT ep.status\n                    FROM sessions s\n                    JOIN execution_processes ep ON ep.session_id = s.id\n                    WHERE s.workspace_id = w.id\n                      AND ep.run_reason IN ('setupscript','cleanupscript','codingagent')\n                    ORDER BY ep.created_at DESC\n                    LIMIT 1\n                ) IN ('failed','killed') THEN 1 ELSE 0 END AS \"is_errored!: i64\"\n\n            FROM workspaces w\n            ORDER BY w.updated_at DESC",
++  "query": "SELECT\n                w.id AS \"id!: Uuid\",\n                w.task_id AS \"task_id: Uuid\",\n                w.container_ref,\n                w.branch,\n                w.setup_completed_at AS \"setup_completed_at: DateTime<Utc>\",\n                w.created_at AS \"created_at!: DateTime<Utc>\",\n                w.updated_at AS \"updated_at!: DateTime<Utc>\",\n                w.archived AS \"archived!: bool\",\n                w.pinned AS \"pinned!: bool\",\n                w.name,\n                w.worktree_deleted AS \"worktree_deleted!: bool\",\n                w.owner_user_id,\n\n                CASE WHEN EXISTS (\n                    SELECT 1\n                    FROM sessions s\n                    JOIN execution_processes ep ON ep.session_id = s.id\n                    WHERE s.workspace_id = w.id\n                      AND ep.status = 'running'\n                      AND ep.run_reason IN ('setupscript','cleanupscript','codingagent')\n                    LIMIT 1\n                ) THEN 1 ELSE 0 END AS \"is_running!: i64\",\n\n                CASE WHEN (\n                    SELECT ep.status\n                    FROM sessions s\n                    JOIN execution_processes ep ON ep.session_id = s.id\n                    WHERE s.workspace_id = w.id\n                      AND ep.run_reason IN ('setupscript','cleanupscript','codingagent')\n                    ORDER BY ep.created_at DESC\n                    LIMIT 1\n                ) IN ('failed','killed') THEN 1 ELSE 0 END AS \"is_errored!: i64\"\n\n            FROM workspaces w\n            ORDER BY w.updated_at DESC",
+   "describe": {
+     "columns": [
+       {
+@@ -59,13 +59,18 @@
+         "type_info": "Bool"
+       },
+       {
+-        "name": "is_running!: i64",
++        "name": "owner_user_id",
+         "ordinal": 11,
++        "type_info": "Text"
++      },
++      {
++        "name": "is_running!: i64",
++        "ordinal": 12,
+         "type_info": "Integer"
+       },
+       {
+         "name": "is_errored!: i64",
+-        "ordinal": 12,
++        "ordinal": 13,
+         "type_info": "Integer"
+       }
+     ],
+@@ -84,9 +89,10 @@
+       false,
+       true,
+       false,
++      true,
+       false,
+       false
+     ]
+   },
+-  "hash": "5154289c5a9ddbc061d42de2baf129e03a75061b8b305110921688f01d112de1"
++  "hash": "7022ab4f602d64aa2dbfe8d42edfdb8c36601c838306c6dddbd52265e1bd7946"
+ }
+diff --git a/crates/db/.sqlx/query-91810eeed4804827717a182ad1b61c641648e2659100f43ef9504fc60e5d244e.json b/crates/db/.sqlx/query-a1393d0ae8411439f7bed0c9e3bd9a3093c96787bc4926876d73d1c0d8da072d.json
+similarity index 56%
+rename from crates/db/.sqlx/query-91810eeed4804827717a182ad1b61c641648e2659100f43ef9504fc60e5d244e.json
+rename to crates/db/.sqlx/query-a1393d0ae8411439f7bed0c9e3bd9a3093c96787bc4926876d73d1c0d8da072d.json
+index 1008829ef..1cdb557b2 100644
+--- a/crates/db/.sqlx/query-91810eeed4804827717a182ad1b61c641648e2659100f43ef9504fc60e5d244e.json
++++ b/crates/db/.sqlx/query-a1393d0ae8411439f7bed0c9e3bd9a3093c96787bc4926876d73d1c0d8da072d.json
+@@ -1,6 +1,6 @@
+ {
+   "db_name": "SQLite",
+-  "query": "\n            SELECT\n                w.id as \"id!: Uuid\",\n                w.task_id as \"task_id: Uuid\",\n                w.container_ref,\n                w.branch as \"branch!\",\n                w.setup_completed_at as \"setup_completed_at: DateTime<Utc>\",\n                w.created_at as \"created_at!: DateTime<Utc>\",\n                w.updated_at as \"updated_at!: DateTime<Utc>\",\n                w.archived as \"archived!: bool\",\n                w.pinned as \"pinned!: bool\",\n                w.name,\n                w.worktree_deleted as \"worktree_deleted!: bool\"\n            FROM workspaces w\n            LEFT JOIN sessions s ON w.id = s.workspace_id\n            LEFT JOIN execution_processes ep ON s.id = ep.session_id AND ep.completed_at IS NOT NULL\n            WHERE w.container_ref IS NOT NULL\n                AND w.worktree_deleted = FALSE\n                AND w.id NOT IN (\n                    SELECT DISTINCT s2.workspace_id\n                    FROM sessions s2\n                    JOIN execution_processes ep2 ON s2.id = ep2.session_id\n                    WHERE ep2.completed_at IS NULL\n                )\n            GROUP BY w.id, w.container_ref, w.updated_at\n            HAVING datetime('now', 'localtime',\n                CASE\n                    WHEN w.archived = 1\n                    THEN '-1 hours'\n                    ELSE '-72 hours'\n                END\n            ) > datetime(\n                MAX(\n                    max(\n                        datetime(w.updated_at),\n                        datetime(ep.completed_at)\n                    )\n                )\n            )\n            ORDER BY MAX(\n                CASE\n                    WHEN ep.completed_at IS NOT NULL THEN ep.completed_at\n                    ELSE w.updated_at\n                END\n            ) ASC\n            ",
++  "query": "\n            SELECT\n                w.id as \"id!: Uuid\",\n                w.task_id as \"task_id: Uuid\",\n                w.container_ref,\n                w.branch as \"branch!\",\n                w.setup_completed_at as \"setup_completed_at: DateTime<Utc>\",\n                w.created_at as \"created_at!: DateTime<Utc>\",\n                w.updated_at as \"updated_at!: DateTime<Utc>\",\n                w.archived as \"archived!: bool\",\n                w.pinned as \"pinned!: bool\",\n                w.name,\n                w.worktree_deleted as \"worktree_deleted!: bool\",\n                w.owner_user_id\n            FROM workspaces w\n            LEFT JOIN sessions s ON w.id = s.workspace_id\n            LEFT JOIN execution_processes ep ON s.id = ep.session_id AND ep.completed_at IS NOT NULL\n            WHERE w.container_ref IS NOT NULL\n                AND w.worktree_deleted = FALSE\n                AND w.id NOT IN (\n                    SELECT DISTINCT s2.workspace_id\n                    FROM sessions s2\n                    JOIN execution_processes ep2 ON s2.id = ep2.session_id\n                    WHERE ep2.completed_at IS NULL\n                )\n            GROUP BY w.id, w.container_ref, w.updated_at\n            HAVING datetime('now', 'localtime',\n                CASE\n                    WHEN w.archived = 1\n                    THEN '-1 hours'\n                    ELSE '-72 hours'\n                END\n            ) > datetime(\n                MAX(\n                    max(\n                        datetime(w.updated_at),\n                        datetime(ep.completed_at)\n                    )\n                )\n            )\n            ORDER BY MAX(\n                CASE\n                    WHEN ep.completed_at IS NOT NULL THEN ep.completed_at\n                    ELSE w.updated_at\n                END\n            ) ASC\n            ",
+   "describe": {
+     "columns": [
+       {
+@@ -57,6 +57,11 @@
+         "name": "worktree_deleted!: bool",
+         "ordinal": 10,
+         "type_info": "Bool"
++      },
++      {
++        "name": "owner_user_id",
++        "ordinal": 11,
++        "type_info": "Text"
+       }
+     ],
+     "parameters": {
+@@ -73,8 +78,9 @@
+       true,
+       true,
+       true,
++      true,
+       true
+     ]
+   },
+-  "hash": "91810eeed4804827717a182ad1b61c641648e2659100f43ef9504fc60e5d244e"
++  "hash": "a1393d0ae8411439f7bed0c9e3bd9a3093c96787bc4926876d73d1c0d8da072d"
+ }
+diff --git a/crates/db/.sqlx/query-64f31710ab7ba14047f31cce44ad36c60a53624f9bcb03a5eaff5d61ca8cc9cf.json b/crates/db/.sqlx/query-f01fb4602cd83d441cb897e058ccbdde8170de2aa67e648faa3eb319c8ab216a.json
+similarity index 83%
+rename from crates/db/.sqlx/query-64f31710ab7ba14047f31cce44ad36c60a53624f9bcb03a5eaff5d61ca8cc9cf.json
+rename to crates/db/.sqlx/query-f01fb4602cd83d441cb897e058ccbdde8170de2aa67e648faa3eb319c8ab216a.json
+index da3ce7ad6..4329a4fc9 100644
+--- a/crates/db/.sqlx/query-64f31710ab7ba14047f31cce44ad36c60a53624f9bcb03a5eaff5d61ca8cc9cf.json
++++ b/crates/db/.sqlx/query-f01fb4602cd83d441cb897e058ccbdde8170de2aa67e648faa3eb319c8ab216a.json
+@@ -1,6 +1,6 @@
+ {
+   "db_name": "SQLite",
+-  "query": "SELECT id AS \"id!: Uuid\",\n                          task_id AS \"task_id: Uuid\",\n                          container_ref,\n                          branch,\n                          setup_completed_at AS \"setup_completed_at: DateTime<Utc>\",\n                          created_at AS \"created_at!: DateTime<Utc>\",\n                          updated_at AS \"updated_at!: DateTime<Utc>\",\n                          archived AS \"archived!: bool\",\n                          pinned AS \"pinned!: bool\",\n                          name,\n                          worktree_deleted AS \"worktree_deleted!: bool\"\n                   FROM workspaces\n                   ORDER BY created_at DESC",
++  "query": "SELECT id AS \"id!: Uuid\",\n                          task_id AS \"task_id: Uuid\",\n                          container_ref,\n                          branch,\n                          setup_completed_at AS \"setup_completed_at: DateTime<Utc>\",\n                          created_at AS \"created_at!: DateTime<Utc>\",\n                          updated_at AS \"updated_at!: DateTime<Utc>\",\n                          archived AS \"archived!: bool\",\n                          pinned AS \"pinned!: bool\",\n                          name,\n                          worktree_deleted AS \"worktree_deleted!: bool\",\n                          owner_user_id\n                   FROM workspaces\n                   ORDER BY created_at DESC",
+   "describe": {
+     "columns": [
+       {
+@@ -57,6 +57,11 @@
+         "name": "worktree_deleted!: bool",
+         "ordinal": 10,
+         "type_info": "Bool"
++      },
++      {
++        "name": "owner_user_id",
++        "ordinal": 11,
++        "type_info": "Text"
+       }
+     ],
+     "parameters": {
+@@ -73,8 +78,9 @@
+       false,
+       false,
+       true,
+-      false
++      false,
++      true
+     ]
+   },
+-  "hash": "64f31710ab7ba14047f31cce44ad36c60a53624f9bcb03a5eaff5d61ca8cc9cf"
++  "hash": "f01fb4602cd83d441cb897e058ccbdde8170de2aa67e648faa3eb319c8ab216a"
+ }
+diff --git a/crates/db/.sqlx/query-f2dbb49b2f839e84a46fdd865d9982b758160517b93bc92d8e12060426daa05d.json b/crates/db/.sqlx/query-f2ee85153d3e9424aa0d8666be1d682ede8465302e4f67ff72be99303315a4c2.json
+similarity index 85%
+rename from crates/db/.sqlx/query-f2dbb49b2f839e84a46fdd865d9982b758160517b93bc92d8e12060426daa05d.json
+rename to crates/db/.sqlx/query-f2ee85153d3e9424aa0d8666be1d682ede8465302e4f67ff72be99303315a4c2.json
+index 0d177a432..f7a72cca7 100644
+--- a/crates/db/.sqlx/query-f2dbb49b2f839e84a46fdd865d9982b758160517b93bc92d8e12060426daa05d.json
++++ b/crates/db/.sqlx/query-f2ee85153d3e9424aa0d8666be1d682ede8465302e4f67ff72be99303315a4c2.json
+@@ -1,6 +1,6 @@
+ {
+   "db_name": "SQLite",
+-  "query": "SELECT  id                AS \"id!: Uuid\",\n                       task_id           AS \"task_id: Uuid\",\n                       container_ref,\n                       branch,\n                       setup_completed_at AS \"setup_completed_at: DateTime<Utc>\",\n                       created_at        AS \"created_at!: DateTime<Utc>\",\n                       updated_at        AS \"updated_at!: DateTime<Utc>\",\n                       archived          AS \"archived!: bool\",\n                       pinned            AS \"pinned!: bool\",\n                       name,\n                       worktree_deleted  AS \"worktree_deleted!: bool\"\n               FROM    workspaces\n               WHERE   rowid = $1",
++  "query": "SELECT  id                AS \"id!: Uuid\",\n                       task_id           AS \"task_id: Uuid\",\n                       container_ref,\n                       branch,\n                       setup_completed_at AS \"setup_completed_at: DateTime<Utc>\",\n                       created_at        AS \"created_at!: DateTime<Utc>\",\n                       updated_at        AS \"updated_at!: DateTime<Utc>\",\n                       archived          AS \"archived!: bool\",\n                       pinned            AS \"pinned!: bool\",\n                       name,\n                       worktree_deleted  AS \"worktree_deleted!: bool\",\n                       owner_user_id\n               FROM    workspaces\n               WHERE   rowid = $1",
+   "describe": {
+     "columns": [
+       {
+@@ -57,6 +57,11 @@
+         "name": "worktree_deleted!: bool",
+         "ordinal": 10,
+         "type_info": "Bool"
++      },
++      {
++        "name": "owner_user_id",
++        "ordinal": 11,
++        "type_info": "Text"
+       }
+     ],
+     "parameters": {
+@@ -73,8 +78,9 @@
+       false,
+       false,
+       true,
+-      false
++      false,
++      true
+     ]
+   },
+-  "hash": "f2dbb49b2f839e84a46fdd865d9982b758160517b93bc92d8e12060426daa05d"
++  "hash": "f2ee85153d3e9424aa0d8666be1d682ede8465302e4f67ff72be99303315a4c2"
+ }
+diff --git a/crates/db/migrations/20260318000000_add_owner_user_id_to_workspaces.sql b/crates/db/migrations/20260318000000_add_owner_user_id_to_workspaces.sql
+new file mode 100644
+index 000000000..b13cdf780
+--- /dev/null
++++ b/crates/db/migrations/20260318000000_add_owner_user_id_to_workspaces.sql
+@@ -0,0 +1,2 @@
++-- Track the user who created each workspace locally.
++ALTER TABLE workspaces ADD COLUMN owner_user_id TEXT;
+diff --git a/crates/db/src/models/workspace.rs b/crates/db/src/models/workspace.rs
+index c33207c8d..9f9fe2da2 100644
+--- a/crates/db/src/models/workspace.rs
++++ b/crates/db/src/models/workspace.rs
+@@ -51,6 +51,7 @@ pub struct Workspace {
+     pub pinned: bool,
+     pub name: Option<String>,
+     pub worktree_deleted: bool,
++    pub owner_user_id: Option<String>,
+ }
+ 
+ #[derive(Debug, Clone, Serialize, Deserialize, TS)]
+@@ -85,6 +86,8 @@ pub struct WorkspaceContext {
+ pub struct CreateWorkspace {
+     pub branch: String,
+     pub name: Option<String>,
++    #[serde(default)]
++    pub owner_user_id: Option<String>,
+ }
+ 
+ impl Workspace {
+@@ -102,7 +105,8 @@ impl Workspace {
+                           archived AS "archived!: bool",
+                           pinned AS "pinned!: bool",
+                           name,
+-                          worktree_deleted AS "worktree_deleted!: bool"
++                          worktree_deleted AS "worktree_deleted!: bool",
++                          owner_user_id
+                    FROM workspaces
+                    ORDER BY created_at DESC"#
+         )
+@@ -204,7 +208,8 @@ impl Workspace {
+                        archived          AS "archived!: bool",
+                        pinned            AS "pinned!: bool",
+                        name,
+-                       worktree_deleted  AS "worktree_deleted!: bool"
++                       worktree_deleted  AS "worktree_deleted!: bool",
++                       owner_user_id
+                FROM    workspaces
+                WHERE   id = $1"#,
+             id
+@@ -226,7 +231,8 @@ impl Workspace {
+                        archived          AS "archived!: bool",
+                        pinned            AS "pinned!: bool",
+                        name,
+-                       worktree_deleted  AS "worktree_deleted!: bool"
++                       worktree_deleted  AS "worktree_deleted!: bool",
++                       owner_user_id
+                FROM    workspaces
+                WHERE   rowid = $1"#,
+             rowid
+@@ -269,7 +275,8 @@ impl Workspace {
+                 w.archived as "archived!: bool",
+                 w.pinned as "pinned!: bool",
+                 w.name,
+-                w.worktree_deleted as "worktree_deleted!: bool"
++                w.worktree_deleted as "worktree_deleted!: bool",
++                w.owner_user_id
+             FROM workspaces w
+             LEFT JOIN sessions s ON w.id = s.workspace_id
+             LEFT JOIN execution_processes ep ON s.id = ep.session_id AND ep.completed_at IS NOT NULL
+@@ -315,15 +322,16 @@ impl Workspace {
+     ) -> Result<Self, WorkspaceError> {
+         Ok(sqlx::query_as!(
+             Workspace,
+-            r#"INSERT INTO workspaces (id, task_id, container_ref, branch, setup_completed_at, name)
+-               VALUES ($1, $2, $3, $4, $5, $6)
+-               RETURNING id as "id!: Uuid", task_id as "task_id: Uuid", container_ref, branch, setup_completed_at as "setup_completed_at: DateTime<Utc>", created_at as "created_at!: DateTime<Utc>", updated_at as "updated_at!: DateTime<Utc>", archived as "archived!: bool", pinned as "pinned!: bool", name, worktree_deleted as "worktree_deleted!: bool""#,
++            r#"INSERT INTO workspaces (id, task_id, container_ref, branch, setup_completed_at, name, owner_user_id)
++               VALUES ($1, $2, $3, $4, $5, $6, $7)
++               RETURNING id as "id!: Uuid", task_id as "task_id: Uuid", container_ref, branch, setup_completed_at as "setup_completed_at: DateTime<Utc>", created_at as "created_at!: DateTime<Utc>", updated_at as "updated_at!: DateTime<Utc>", archived as "archived!: bool", pinned as "pinned!: bool", name, worktree_deleted as "worktree_deleted!: bool", owner_user_id"#,
+             id,
+             Option::<Uuid>::None,
+             Option::<String>::None,
+             data.branch,
+             Option::<DateTime<Utc>>::None,
+-            data.name
++            data.name,
++            data.owner_user_id
+         )
+         .fetch_one(pool)
+         .await?)
+@@ -514,6 +522,7 @@ impl Workspace {
+                 w.pinned AS "pinned!: bool",
+                 w.name,
+                 w.worktree_deleted AS "worktree_deleted!: bool",
++                w.owner_user_id,
+ 
+                 CASE WHEN EXISTS (
+                     SELECT 1
+@@ -556,6 +565,7 @@ impl Workspace {
+                     pinned: rec.pinned,
+                     name: rec.name,
+                     worktree_deleted: rec.worktree_deleted,
++                    owner_user_id: rec.owner_user_id,
+                 },
+                 is_running: rec.is_running != 0,
+                 is_errored: rec.is_errored != 0,
+@@ -608,6 +618,7 @@ impl Workspace {
+                 w.pinned AS "pinned!: bool",
+                 w.name,
+                 w.worktree_deleted AS "worktree_deleted!: bool",
++                w.owner_user_id,
+ 
+                 CASE WHEN EXISTS (
+                     SELECT 1
+@@ -653,6 +664,7 @@ impl Workspace {
+                 pinned: rec.pinned,
+                 name: rec.name,
+                 worktree_deleted: rec.worktree_deleted,
++                owner_user_id: rec.owner_user_id,
+             },
+             is_running: rec.is_running != 0,
+             is_errored: rec.is_errored != 0,
+diff --git a/crates/server/src/routes/workspaces/create.rs b/crates/server/src/routes/workspaces/create.rs
+index 6b79466f7..2a8d6afec 100644
+--- a/crates/server/src/routes/workspaces/create.rs
++++ b/crates/server/src/routes/workspaces/create.rs
+@@ -1,5 +1,6 @@
+ use std::collections::HashMap;
+ 
++use api_types::LoginStatus;
+ use axum::{Json, extract::State, response::Json as ResponseJson};
+ use db::models::{
+     requests::{
+@@ -34,11 +35,20 @@ pub(crate) async fn create_workspace_record(
+         .git_branch_from_workspace(&workspace_id, branch_label)
+         .await;
+ 
++    let owner_user_id = match deployment.auth_context().cached_profile().await {
++        Some(profile) => Some(profile.user_id.to_string()),
++        None => match deployment.get_login_status().await {
++            LoginStatus::LoggedIn { profile } => profile.map(|p| p.user_id.to_string()),
++            LoginStatus::LoggedOut => None,
++        },
++    };
++
+     let workspace = Workspace::create(
+         &deployment.db().pool,
+         &CreateWorkspace {
+             branch: git_branch_name,
+             name: name.filter(|workspace_name| !workspace_name.is_empty()),
++            owner_user_id,
+         },
+         workspace_id,
+     )
+diff --git a/crates/server/src/routes/workspaces/pr.rs b/crates/server/src/routes/workspaces/pr.rs
+index 9a8fd72c3..5711a8377 100644
+--- a/crates/server/src/routes/workspaces/pr.rs
++++ b/crates/server/src/routes/workspaces/pr.rs
+@@ -719,6 +719,7 @@ pub async fn create_workspace_from_pr(
+         &CreateWorkspace {
+             branch: target_branch_ref.clone(),
+             name: Some(payload.pr_title.clone()),
++            owner_user_id: None,
+         },
+         workspace_id,
+     )
+diff --git a/packages/web-core/src/pages/workspaces/WorkspacesSidebarContainer.tsx b/packages/web-core/src/pages/workspaces/WorkspacesSidebarContainer.tsx
+index 217f7c75d..7452708ec 100644
+--- a/packages/web-core/src/pages/workspaces/WorkspacesSidebarContainer.tsx
++++ b/packages/web-core/src/pages/workspaces/WorkspacesSidebarContainer.tsx
+@@ -8,11 +8,9 @@ import { useAllOrganizationProjects } from '@/shared/hooks/useAllOrganizationPro
+ import { useUserOrganizations } from '@/shared/hooks/useUserOrganizations';
+ import { useOrganizationSelection } from '@/shared/hooks/useOrganizationSelection';
+ import { useAuth } from '@/shared/hooks/auth/useAuth';
+-import { makeLocalApiRequest } from '@/shared/lib/localApiTransport';
+ import {
+   MemberRole as MemberRoleEnum,
+   ScratchType,
+-  type ApiResponse,
+   type DraftWorkspaceData,
+ } from 'shared/types';
+ import type { Project } from 'shared/remote-types';
+@@ -359,125 +357,23 @@ export function WorkspacesSidebarContainer({
+     return map;
+   }, [remoteWorkspaces]);
+ 
+-  // Map local workspace ID -> creator (remote owner user ID) when available
+-  const remoteOwnerByLocalId = useMemo(() => {
++  // Build owner map from local workspace stream data (owner_user_id stored in local SQLite).
++  // Falls back to remote workspace data for workspaces created before this field existed.
++  const ownerByLocalId = useMemo(() => {
+     const map = new Map<string, string>();
+-    for (const rw of remoteWorkspaces) {
+-      if (rw.local_workspace_id) {
+-        map.set(rw.local_workspace_id, rw.owner_user_id);
++    for (const ws of [...activeWorkspaces, ...archivedWorkspaces]) {
++      if (ws.ownerUserId) {
++        map.set(ws.id, ws.ownerUserId);
+       }
+     }
+-    return map;
+-  }, [remoteWorkspaces]);
+-
+-  const [resolvedOwnerByLocalId, setResolvedOwnerByLocalId] = useState<
+-    Record<string, string>
+-  >({});
+-  const [ownerLookupAttemptedIds, setOwnerLookupAttemptedIds] = useState<
+-    Record<string, true>
+-  >({});
+-
+-  const allWorkspaceIds = useMemo(
+-    () =>
+-      Array.from(
+-        new Set([...activeWorkspaces, ...archivedWorkspaces].map((ws) => ws.id))
+-      ),
+-    [activeWorkspaces, archivedWorkspaces]
+-  );
+-
+-  useEffect(() => {
+-    if (!currentUserId || allWorkspaceIds.length === 0) {
+-      return;
+-    }
+-
+-    const idsToResolve = allWorkspaceIds.filter(
+-      (workspaceId) =>
+-        !remoteOwnerByLocalId.has(workspaceId) &&
+-        !resolvedOwnerByLocalId[workspaceId] &&
+-        !ownerLookupAttemptedIds[workspaceId]
+-    );
+-
+-    if (idsToResolve.length === 0) {
+-      return;
+-    }
+-
+-    setOwnerLookupAttemptedIds((prev) => ({
+-      ...prev,
+-      ...Object.fromEntries(idsToResolve.map((id) => [id, true as const])),
+-    }));
+-
+-    let cancelled = false;
+-
+-    void (async () => {
+-      const ownerEntries = await Promise.all(
+-        idsToResolve.map(async (workspaceId) => {
+-          try {
+-            const response = await makeLocalApiRequest(
+-              `/api/remote/workspaces/by-local-id/${workspaceId}`
+-            );
+-            if (!response.ok) {
+-              return null;
+-            }
+-
+-            const payload = (await response.json()) as ApiResponse<{
+-              owner_user_id?: string | null;
+-            }>;
+-
+-            const ownerUserId = payload.data?.owner_user_id ?? null;
+-            if (!ownerUserId) {
+-              return null;
+-            }
+-
+-            return { workspaceId, ownerUserId };
+-          } catch {
+-            return null;
+-          }
+-        })
+-      );
+-
+-      if (cancelled) {
+-        return;
+-      }
+-
+-      const resolvedEntries = ownerEntries.filter(
+-        (entry): entry is { workspaceId: string; ownerUserId: string } =>
+-          entry !== null
+-      );
+-
+-      if (resolvedEntries.length === 0) {
+-        return;
+-      }
+-
+-      setResolvedOwnerByLocalId((prev) => ({
+-        ...prev,
+-        ...Object.fromEntries(
+-          resolvedEntries.map((entry) => [entry.workspaceId, entry.ownerUserId])
+-        ),
+-      }));
+-    })();
+-
+-    return () => {
+-      cancelled = true;
+-    };
+-  }, [
+-    allWorkspaceIds,
+-    currentUserId,
+-    ownerLookupAttemptedIds,
+-    remoteOwnerByLocalId,
+-    resolvedOwnerByLocalId,
+-  ]);
+-
+-  const ownerByLocalId = useMemo(() => {
+-    const map = new Map(remoteOwnerByLocalId);
+-    for (const [workspaceId, ownerUserId] of Object.entries(
+-      resolvedOwnerByLocalId
+-    )) {
+-      if (!map.has(workspaceId)) {
+-        map.set(workspaceId, ownerUserId);
++    // Remote data as fallback for older workspaces without local owner_user_id
++    for (const rw of remoteWorkspaces) {
++      if (rw.local_workspace_id && !map.has(rw.local_workspace_id)) {
++        map.set(rw.local_workspace_id, rw.owner_user_id);
+       }
+     }
+     return map;
+-  }, [remoteOwnerByLocalId, resolvedOwnerByLocalId]);
++  }, [activeWorkspaces, archivedWorkspaces, remoteWorkspaces]);
+ 
+   const creatorFilterOptions = useMemo(() => {
+     const ownerIds = new Set(ownerByLocalId.values());
+diff --git a/packages/web-core/src/shared/hooks/useWorkspaces.ts b/packages/web-core/src/shared/hooks/useWorkspaces.ts
+index 8d92b707e..fbf403f08 100644
+--- a/packages/web-core/src/shared/hooks/useWorkspaces.ts
++++ b/packages/web-core/src/shared/hooks/useWorkspaces.ts
+@@ -33,6 +33,7 @@ export interface SidebarWorkspace {
+   prStatus?: 'open' | 'merged' | 'closed' | 'unknown';
+   prNumber?: number;
+   prUrl?: string;
++  ownerUserId?: string | null;
+ }
+ 
+ // Keep the old export name for backwards compatibility
+@@ -85,6 +86,7 @@ function toSidebarWorkspace(
+     prNumber:
+       summary?.pr_number != null ? Number(summary.pr_number) : undefined,
+     prUrl: summary?.pr_url ?? undefined,
++    ownerUserId: ws.owner_user_id,
+   };
+ }
+ 
+diff --git a/shared/types.ts b/shared/types.ts
+index dfd704c01..f812cb4e5 100644
+--- a/shared/types.ts
++++ b/shared/types.ts
+@@ -152,9 +152,9 @@ export type CreateScratch = { payload: ScratchPayload, };
+ 
+ export type UpdateScratch = { payload: ScratchPayload, };
+ 
+-export type Workspace = { id: string, task_id: string | null, container_ref: string | null, branch: string, setup_completed_at: string | null, created_at: string, updated_at: string, archived: boolean, pinned: boolean, name: string | null, worktree_deleted: boolean, };
++export type Workspace = { id: string, task_id: string | null, container_ref: string | null, branch: string, setup_completed_at: string | null, created_at: string, updated_at: string, archived: boolean, pinned: boolean, name: string | null, worktree_deleted: boolean, owner_user_id: string | null, };
+ 
+-export type WorkspaceWithStatus = { is_running: boolean, is_errored: boolean, id: string, task_id: string | null, container_ref: string | null, branch: string, setup_completed_at: string | null, created_at: string, updated_at: string, archived: boolean, pinned: boolean, name: string | null, worktree_deleted: boolean, };
++export type WorkspaceWithStatus = { is_running: boolean, is_errored: boolean, id: string, task_id: string | null, container_ref: string | null, branch: string, setup_completed_at: string | null, created_at: string, updated_at: string, archived: boolean, pinned: boolean, name: string | null, worktree_deleted: boolean, owner_user_id: string | null, };
+ 
+ export type Session = { id: string, workspace_id: string, name: string | null, executor: string | null, agent_working_dir: string | null, created_at: string, updated_at: string, };
+ 
+-- 
+2.50.1
+

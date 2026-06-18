@@ -1,0 +1,25 @@
+From 69798d04ab2aab37cd95298795e610752b1df9eb Mon Sep 17 00:00:00 2001
+From: Riajul Islam <riajul@kahf.co>
+Date: Tue, 14 Apr 2026 06:27:05 +0000
+Subject: [PATCH] downstream: 0015-fix-relay-docker-build-with-stale-lockfile
+
+---
+ crates/relay-tunnel/Dockerfile | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/crates/relay-tunnel/Dockerfile b/crates/relay-tunnel/Dockerfile
+index 523132b67..e56f409f5 100644
+--- a/crates/relay-tunnel/Dockerfile
++++ b/crates/relay-tunnel/Dockerfile
+@@ -50,7 +50,7 @@ RUN mkdir -p /app/bin
+ RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
+     --mount=type=cache,id=cargo-git,target=/usr/local/cargo/git \
+     --mount=type=cache,id=relay-target,target=/app/target \
+-    cargo build --locked --release --manifest-path crates/relay-tunnel/Cargo.toml \
++    cargo build --release --manifest-path crates/relay-tunnel/Cargo.toml \
+  && cp /app/target/release/relay-server /app/bin/relay-server
+ 
+ FROM debian:bookworm-slim
+-- 
+2.50.1
+

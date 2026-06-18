@@ -1,0 +1,107 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "append_prompt": {
+      "title": "Append Prompt",
+      "description": "Extra text appended to the prompt",
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "textarea",
+      "default": null
+    },
+    "model": {
+      "title": "Model",
+      "description": "Model name or ID passed to `agy --model`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "effort": {
+      "title": "Effort",
+      "description": "Model effort variant from `agy models`, combined with the base model name for `agy --model`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "dangerously_skip_permissions": {
+      "title": "Dangerously Skip Permissions",
+      "description": "Pass `--dangerously-skip-permissions` to Antigravity CLI.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "sandbox": {
+      "title": "Sandbox",
+      "description": "Pass `--sandbox` to Antigravity CLI.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "print_timeout": {
+      "title": "Print Timeout",
+      "description": "Timeout passed to `agy --print-timeout`, for example `5m0s` or `30s`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "add_dir": {
+      "title": "Additional Directories",
+      "description": "Extra directories passed as repeated `agy --add-dir` values.",
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "string"
+      }
+    },
+    "context_window": {
+      "title": "Context Window",
+      "description": "Context window used for Vibe Kanban's context usage gauge. Antigravity CLI does not currently expose exact token usage, so usage is estimated.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0
+    },
+    "base_command_override": {
+      "title": "Base Command Override",
+      "description": "Override the base command with a custom command",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "additional_params": {
+      "title": "Additional Parameters",
+      "description": "Additional parameters to append to the base command",
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "string"
+      }
+    },
+    "env": {
+      "title": "Environment Variables",
+      "description": "Environment variables to set when running the executor",
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": {
+        "type": "string"
+      }
+    }
+  },
+  "type": "object"
+}

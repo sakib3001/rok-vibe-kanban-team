@@ -1,0 +1,189 @@
+From a2701aebe53d9148044dd504ba23051f7adcbe2a Mon Sep 17 00:00:00 2001
+From: Riajul Islam <riajul@kahf.co>
+Date: Tue, 21 Apr 2026 13:07:33 +0000
+Subject: [PATCH] feat: support env configured editor onboarding
+
+---
+ .../src/services/config/editor/mod.rs         | 66 +++++++++++++++++++
+ crates/services/src/services/config/mod.rs    |  5 +-
+ .../src/services/config/versions/v8.rs        | 50 ++++++++++++++
+ 3 files changed, 119 insertions(+), 2 deletions(-)
+
+diff --git a/crates/services/src/services/config/editor/mod.rs b/crates/services/src/services/config/editor/mod.rs
+index 404800b1e..e9bf16fb5 100644
+--- a/crates/services/src/services/config/editor/mod.rs
++++ b/crates/services/src/services/config/editor/mod.rs
+@@ -92,6 +92,48 @@ impl EditorConfig {
+         }
+     }
+ 
++    pub fn with_environment_overrides(&self) -> Self {
++        self.with_environment_values(
++            std::env::var("VIBE_KANBAN_EDITOR_TYPE")
++                .or_else(|_| std::env::var("VIBE_KANBAN_EDITOR"))
++                .ok()
++                .as_deref(),
++            std::env::var("VIBE_KANBAN_CODE_SERVER_URL")
++                .or_else(|_| std::env::var("CODE_SERVER_URL"))
++                .ok()
++                .as_deref(),
++        )
++    }
++
++    fn with_environment_values(
++        &self,
++        editor_type: Option<&str>,
++        code_server_url: Option<&str>,
++    ) -> Self {
++        let parsed_editor_type = editor_type.and_then(|value| EditorType::from_str(value).ok());
++        let code_server_url = code_server_url
++            .map(str::trim)
++            .filter(|value| !value.is_empty())
++            .map(str::to_string);
++
++        if parsed_editor_type.is_none() && code_server_url.is_none() {
++            return self.clone();
++        }
++
++        let mut config = self.clone();
++        if let Some(editor_type) = parsed_editor_type {
++            config.editor_type = editor_type;
++        } else if code_server_url.is_some() {
++            config.editor_type = EditorType::CodeServer;
++        }
++
++        if let Some(code_server_url) = code_server_url {
++            config.custom_command = Some(code_server_url);
++        }
++
++        config
++    }
++
+     fn get_command(&self) -> CommandBuilder {
+         let base_command = match &self.editor_type {
+             EditorType::VsCode => "code",
+@@ -388,4 +430,28 @@ mod tests {
+ 
+         assert_eq!(folder, repo_path.join("src").to_string_lossy());
+     }
++
++    #[test]
++    fn environment_code_server_url_selects_code_server_editor() {
++        let config = EditorConfig::default()
++            .with_environment_values(None, Some("https://code.example.com/"));
++
++        assert!(matches!(config.editor_type, EditorType::CodeServer));
++        assert_eq!(
++            config.custom_command.as_deref(),
++            Some("https://code.example.com/")
++        );
++    }
++
++    #[test]
++    fn environment_editor_type_overrides_existing_editor() {
++        let config = EditorConfig::default()
++            .with_environment_values(Some("CODE_SERVER"), Some("https://code.example.com/"));
++
++        assert!(matches!(config.editor_type, EditorType::CodeServer));
++        assert_eq!(
++            config.custom_command.as_deref(),
++            Some("https://code.example.com/")
++        );
++    }
+ }
+diff --git a/crates/services/src/services/config/mod.rs b/crates/services/src/services/config/mod.rs
+index a9707dc5d..bd77f20ec 100644
+--- a/crates/services/src/services/config/mod.rs
++++ b/crates/services/src/services/config/mod.rs
+@@ -45,13 +45,14 @@ pub type SendMessageShortcut = versions::v8::SendMessageShortcut;
+ 
+ /// Will always return config, trying old schemas or eventually returning default
+ pub async fn load_config_from_file(config_path: &PathBuf) -> Config {
+-    match std::fs::read_to_string(config_path) {
++    let config = match std::fs::read_to_string(config_path) {
+         Ok(raw_config) => Config::from(raw_config),
+         Err(_) => {
+             tracing::info!("No config file found, creating one");
+             Config::default()
+         }
+-    }
++    };
++    config.with_environment_overrides()
+ }
+ 
+ /// Saves the config to the given path
+diff --git a/crates/services/src/services/config/versions/v8.rs b/crates/services/src/services/config/versions/v8.rs
+index 12b2601ff..f6bd0f6df 100644
+--- a/crates/services/src/services/config/versions/v8.rs
++++ b/crates/services/src/services/config/versions/v8.rs
+@@ -71,6 +71,26 @@ pub struct Config {
+ }
+ 
+ impl Config {
++    pub fn with_environment_overrides(mut self) -> Self {
++        self = self.with_environment_values(
++            std::env::var("VIBE_KANBAN_BYPASS_ONBOARDING")
++                .ok()
++                .as_deref(),
++        );
++        self.editor = self.editor.with_environment_overrides();
++        self
++    }
++
++    fn with_environment_values(mut self, bypass_onboarding: Option<&str>) -> Self {
++        if env_flag_enabled(bypass_onboarding) {
++            self.disclaimer_acknowledged = true;
++            self.onboarding_acknowledged = true;
++            self.remote_onboarding_acknowledged = true;
++        }
++
++        self
++    }
++
+     fn from_v7_config(old_config: v7::Config) -> Self {
+         // Convert Option<bool> to bool: None or Some(true) become true, Some(false) stays false
+         let analytics_enabled = old_config.analytics_enabled.unwrap_or(true);
+@@ -108,6 +128,13 @@ impl Config {
+     }
+ }
+ 
++fn env_flag_enabled(value: Option<&str>) -> bool {
++    value
++        .map(str::trim)
++        .map(str::to_ascii_lowercase)
++        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
++}
++
+ impl From<String> for Config {
+     fn from(raw_config: String) -> Self {
+         if let Ok(config) = serde_json::from_str::<Config>(&raw_config)
+@@ -158,3 +185,26 @@ impl Default for Config {
+         }
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::Config;
++
++    #[test]
++    fn environment_bypass_acknowledges_onboarding() {
++        let config = Config::default().with_environment_values(Some("true"));
++
++        assert!(config.disclaimer_acknowledged);
++        assert!(config.onboarding_acknowledged);
++        assert!(config.remote_onboarding_acknowledged);
++    }
++
++    #[test]
++    fn environment_bypass_ignores_falsey_values() {
++        let config = Config::default().with_environment_values(Some("false"));
++
++        assert!(!config.disclaimer_acknowledged);
++        assert!(!config.onboarding_acknowledged);
++        assert!(!config.remote_onboarding_acknowledged);
++    }
++}
+-- 
+2.50.1
+

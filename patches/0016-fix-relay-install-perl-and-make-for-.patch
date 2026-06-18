@@ -1,0 +1,26 @@
+From 5d33f404b0a10153fb499534c294d302b434a4f0 Mon Sep 17 00:00:00 2001
+From: Riajul Islam <riajul@kahf.co>
+Date: Tue, 14 Apr 2026 06:27:05 +0000
+Subject: [PATCH] downstream:
+ 0016-fix-relay-install-perl-and-make-for-vendored-openssl
+
+---
+ crates/relay-tunnel/Dockerfile | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/crates/relay-tunnel/Dockerfile b/crates/relay-tunnel/Dockerfile
+index e56f409f5..09287adc6 100644
+--- a/crates/relay-tunnel/Dockerfile
++++ b/crates/relay-tunnel/Dockerfile
+@@ -6,7 +6,7 @@ ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
+ ENV CARGO_TARGET_DIR=/app/target
+ 
+ RUN apt-get update \
+-  && apt-get install -y --no-install-recommends pkg-config libssl-dev ca-certificates \
++  && apt-get install -y --no-install-recommends pkg-config libssl-dev ca-certificates perl make \
+   && rm -rf /var/lib/apt/lists/*
+ 
+ WORKDIR /app
+-- 
+2.50.1
+

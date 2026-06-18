@@ -1,0 +1,14 @@
+http://localhost {
+	# Local validation (no TLS, no public DNS).
+
+	# Issue-ingestion API (only when `--profile ingest` is running).
+	handle /ingest/* {
+		reverse_proxy ingest:8090
+	}
+
+	handle {
+		reverse_proxy remote:8081 {
+			flush_interval -1
+		}
+	}
+}

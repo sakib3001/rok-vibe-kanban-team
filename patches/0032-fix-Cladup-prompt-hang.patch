@@ -1,0 +1,141 @@
+From 62c464c7669de5a5155bfb60f56b09c8c0740028 Mon Sep 17 00:00:00 2001
+From: Riajul Islam <kmriajulislami@gmail.com>
+Date: Thu, 11 Jun 2026 15:31:31 +0600
+Subject: [PATCH] fix: make Cladup prompt input one-shot
+
+---
+ crates/executors/src/executors/claude.rs | 74 ++++++++++++++++++++----
+ 1 file changed, 62 insertions(+), 12 deletions(-)
+
+diff --git a/crates/executors/src/executors/claude.rs b/crates/executors/src/executors/claude.rs
+index 238e9560c..e3b1aad2c 100644
+--- a/crates/executors/src/executors/claude.rs
++++ b/crates/executors/src/executors/claude.rs
+@@ -16,7 +16,7 @@ use async_trait::async_trait;
+ use futures::StreamExt;
+ use schemars::JsonSchema;
+ use serde::{Deserialize, Serialize};
+-use tokio::process::Command;
++use tokio::{io::AsyncWriteExt, process::Command};
+ use tokio_util::sync::CancellationToken;
+ use ts_rs::TS;
+ use workspace_utils::{
+@@ -154,9 +154,13 @@ pub struct ClaudeCode {
+ }
+ 
+ impl ClaudeCode {
++    fn cladup_enabled(&self) -> bool {
++        self.cladup.unwrap_or(false)
++    }
++
+     async fn build_command_builder(&self) -> Result<CommandBuilder, CommandBuildError> {
+         let claude_code_router = self.claude_code_router.unwrap_or(false);
+-        let cladup = self.cladup.unwrap_or(false);
++        let cladup = self.cladup_enabled();
+ 
+         if self.cmd.base_command_override.is_some() && (claude_code_router || cladup) {
+             tracing::warn!(
+@@ -175,8 +179,14 @@ impl ClaudeCode {
+             tracing::warn!("Both plan and approvals are enabled. Plan will take precedence.");
+         }
+         if plan || approvals {
+-            // Enable bypass at startup, otherwise we cannot change to it after exiting plan mode
+-            builder = builder.extend_params(["--permission-prompt-tool=stdio"]);
++            if cladup {
++                tracing::warn!(
++                    "cladup does not support Claude's stdio approval protocol; using bypass permissions"
++                );
++            } else {
++                // Enable bypass at startup, otherwise we cannot change to it after exiting plan mode
++                builder = builder.extend_params(["--permission-prompt-tool=stdio"]);
++            }
+             builder = builder.extend_params([format!(
+                 "--permission-mode={}",
+                 PermissionMode::BypassPermissions
+@@ -196,13 +206,11 @@ impl ClaudeCode {
+         if let Some(agent) = &self.agent {
+             builder = builder.extend_params(["--agent", agent]);
+         }
+-        builder = builder.extend_params([
+-            "--verbose",
+-            "--output-format=stream-json",
+-            "--input-format=stream-json",
+-            "--include-partial-messages",
+-            "--replay-user-messages",
+-        ]);
++        builder = builder.extend_params(["--verbose", "--output-format=stream-json"]);
++        if !cladup {
++            builder = builder.extend_params(["--input-format=stream-json"]);
++        }
++        builder = builder.extend_params(["--include-partial-messages", "--replay-user-messages"]);
+ 
+         apply_overrides(builder, &self.cmd)
+     }
+@@ -665,6 +673,18 @@ impl ClaudeCode {
+             tracing::info!("ANTHROPIC_API_KEY removed from environment");
+         }
+ 
++        if self.cladup_enabled() {
++            let mut child = command.group_spawn_no_window()?;
++
++            // Cladup print mode reads stdin to EOF before launching Claude.
++            if let Some(mut stdin) = child.inner().stdin.take() {
++                stdin.write_all(combined_prompt.as_bytes()).await?;
++                stdin.shutdown().await?;
++            }
++
++            return Ok(child.into());
++        }
++
+         let mut child = command.group_spawn_no_window()?;
+         let child_stdout = child.inner().stdout.take().ok_or_else(|| {
+             ExecutorError::Io(std::io::Error::other("Claude Code missing stdout"))
+@@ -2972,7 +2992,7 @@ mod tests {
+     }
+ 
+     #[tokio::test]
+-    async fn test_cladup_builds_claude_shim_command() {
++    async fn test_cladup_builds_one_shot_command() {
+         let mut executor = test_executor();
+         executor.cladup = Some(true);
+ 
+@@ -2981,6 +3001,36 @@ mod tests {
+         assert_eq!(builder.base, "npx -y github:iamriajul/cladup");
+         let params = builder.params.as_ref().expect("Claude command params");
+         assert_eq!(params.first().map(String::as_str), Some("-p"));
++        assert!(params.contains(&"--output-format=stream-json".to_string()));
++        assert!(!params.contains(&"--input-format=stream-json".to_string()));
++    }
++
++    #[tokio::test]
++    async fn test_cladup_does_not_use_stdio_permission_prompt() {
++        let mut executor = test_executor();
++        executor.cladup = Some(true);
++        executor.approvals = Some(true);
++
++        let builder = executor.build_command_builder().await.unwrap();
++        let params = builder.params.as_ref().expect("Claude command params");
++
++        assert!(!params.contains(&"--permission-prompt-tool=stdio".to_string()));
++        assert!(params.contains(&format!(
++            "--permission-mode={}",
++            PermissionMode::BypassPermissions
++        )));
++    }
++
++    #[tokio::test]
++    async fn test_standard_claude_keeps_control_protocol_command() {
++        let mut executor = test_executor();
++        executor.approvals = Some(true);
++
++        let builder = executor.build_command_builder().await.unwrap();
++        let params = builder.params.as_ref().expect("Claude command params");
++
++        assert!(params.contains(&"--permission-prompt-tool=stdio".to_string()));
++        assert!(params.contains(&"--input-format=stream-json".to_string()));
+     }
+ 
+     #[tokio::test]
+-- 
+2.50.1 (Apple Git-155)
+

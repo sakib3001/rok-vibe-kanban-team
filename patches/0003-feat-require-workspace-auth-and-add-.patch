@@ -1,0 +1,713 @@
+From b6a897a42c6f768bb511f0df6120e2652999676d Mon Sep 17 00:00:00 2001
+From: Riajul Islam <riajul@kahf.co>
+Date: Tue, 14 Apr 2026 06:27:04 +0000
+Subject: [PATCH] downstream:
+ 0003-feat-require-workspace-auth-and-add-admin-scoped-cre
+
+---
+ crates/server/src/routes/workspaces/mod.rs    |  31 ++-
+ .../src/pages/workspaces/WorkspacesLayout.tsx |  34 ++-
+ .../workspaces/WorkspacesSidebarContainer.tsx | 234 +++++++++++++++++-
+ .../src/shared/hooks/useUserSystem.ts         |   2 +
+ .../shared/hooks/useUserSystemController.ts   |   4 +
+ .../src/shared/hooks/useWorkspaces.ts         |  27 +-
+ .../shared/providers/WorkspaceProvider.tsx    |  29 ++-
+ 7 files changed, 336 insertions(+), 25 deletions(-)
+
+diff --git a/crates/server/src/routes/workspaces/mod.rs b/crates/server/src/routes/workspaces/mod.rs
+index a0a3f3c39..144c749c1 100644
+--- a/crates/server/src/routes/workspaces/mod.rs
++++ b/crates/server/src/routes/workspaces/mod.rs
+@@ -13,13 +13,34 @@ pub mod repos;
+ pub mod streams;
+ pub mod workspace_summary;
+ 
++use api_types::LoginStatus;
+ use axum::{
+     Router,
+-    middleware::from_fn_with_state,
++    body::Body,
++    extract::State,
++    http::Request,
++    middleware::{Next, from_fn_with_state},
++    response::Response,
+     routing::{get, post},
+ };
++use deployment::Deployment;
+ 
+-use crate::{DeploymentImpl, middleware::load_workspace_middleware};
++use crate::{DeploymentImpl, error::ApiError, middleware::load_workspace_middleware};
++
++async fn require_workspace_auth_if_shared(
++    State(deployment): State<DeploymentImpl>,
++    request: Request<Body>,
++    next: Next,
++) -> Result<Response, ApiError> {
++    if deployment.remote_info().get_api_base().is_none() {
++        return Ok(next.run(request).await);
++    }
++
++    match deployment.get_login_status().await {
++        LoginStatus::LoggedIn { .. } => Ok(next.run(request).await),
++        LoginStatus::LoggedOut => Err(ApiError::Unauthorized),
++    }
++}
+ 
+ pub fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
+     let workspace_id_router = Router::new()
+@@ -55,7 +76,11 @@ pub fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
+         )
+         .nest("/{id}", workspace_id_router)
+         .nest("/{id}/attachments", attachments::router(deployment))
+-        .nest("/{id}/links", links::router(deployment));
++        .nest("/{id}/links", links::router(deployment))
++        .layer(from_fn_with_state(
++            deployment.clone(),
++            require_workspace_auth_if_shared,
++        ));
+ 
+     Router::new().nest("/workspaces", workspaces_router)
+ }
+diff --git a/packages/web-core/src/pages/workspaces/WorkspacesLayout.tsx b/packages/web-core/src/pages/workspaces/WorkspacesLayout.tsx
+index 42565b86d..2eca9f6f5 100644
+--- a/packages/web-core/src/pages/workspaces/WorkspacesLayout.tsx
++++ b/packages/web-core/src/pages/workspaces/WorkspacesLayout.tsx
+@@ -33,6 +33,8 @@ import { CreateChatBoxContainer } from '@/shared/components/CreateChatBoxContain
+ import { PreviewBrowserContainer } from './PreviewBrowserContainer';
+ import { WorkspacesGuideDialog } from '@/shared/dialogs/shared/WorkspacesGuideDialog';
+ import { useUserSystem } from '@/shared/hooks/useUserSystem';
++import { useAuth } from '@/shared/hooks/auth/useAuth';
++import { LoginRequiredPrompt } from '@/shared/dialogs/shared/LoginRequiredPrompt';
+ 
+ import {
+   PERSIST_KEYS,
+@@ -110,6 +112,7 @@ export function WorkspacesLayout() {
+   const isMobile = useIsMobile();
+   const [mobileTab] = useMobileActiveTab();
+   const mainContainerRef = useRef<WorkspacesMainContainerHandle>(null);
++  const { isSignedIn, isLoaded: authLoaded } = useAuth();
+ 
+   const handleScrollToBottom = useCallback(
+     (behavior: 'auto' | 'smooth' = 'smooth') => {
+@@ -137,15 +140,18 @@ export function WorkspacesLayout() {
+ 
+   const {
+     config,
++    sharedApiBase,
+     updateAndSaveConfig,
+-    loading: configLoading,
++    loading: systemLoading,
+   } = useUserSystem();
++  const requiresWorkspacesAuth = Boolean(sharedApiBase);
+   const hasAutoShownWorkspacesGuide = useRef(false);
+ 
+   // Auto-show Workspaces Guide on first visit
+   useEffect(() => {
+     if (hasAutoShownWorkspacesGuide.current) return;
+-    if (configLoading || !config) return;
++    if (requiresWorkspacesAuth && !isSignedIn) return;
++    if (systemLoading || !config) return;
+ 
+     const seenFeatures = config.showcases?.seen_features ?? [];
+     if (seenFeatures.includes(WORKSPACES_GUIDE_ID)) return;
+@@ -156,7 +162,13 @@ export function WorkspacesLayout() {
+       showcases: { seen_features: [...seenFeatures, WORKSPACES_GUIDE_ID] },
+     });
+     WorkspacesGuideDialog.show().finally(() => WorkspacesGuideDialog.hide());
+-  }, [configLoading, config, updateAndSaveConfig]);
++  }, [
++    requiresWorkspacesAuth,
++    isSignedIn,
++    systemLoading,
++    config,
++    updateAndSaveConfig,
++  ]);
+ 
+   // Ensure left panels visible when right main panel hidden
+   useEffect(() => {
+@@ -204,6 +216,22 @@ export function WorkspacesLayout() {
+     [isLeftMainPanelVisible, rightMainPanelMode, setRightMainPanelSize]
+   );
+ 
++  if (requiresWorkspacesAuth && (!authLoaded || systemLoading)) {
++    return (
++      <div className="flex items-center justify-center h-full w-full">
++        <p className="text-low">{t('states.loading')}</p>
++      </div>
++    );
++  }
++
++  if (requiresWorkspacesAuth && !isSignedIn) {
++    return (
++      <div className="flex items-center justify-center h-full w-full p-base">
++        <LoginRequiredPrompt className="max-w-md" />
++      </div>
++    );
++  }
++
+   // ── Mobile layout ──────────────────────────────────────────────────
+   // Uses `hidden` CSS class (NOT conditional rendering) to preserve
+   // WebSocket connections and scroll positions across tab switches.
+diff --git a/packages/web-core/src/pages/workspaces/WorkspacesSidebarContainer.tsx b/packages/web-core/src/pages/workspaces/WorkspacesSidebarContainer.tsx
+index 19d2bbbc9..217f7c75d 100644
+--- a/packages/web-core/src/pages/workspaces/WorkspacesSidebarContainer.tsx
++++ b/packages/web-core/src/pages/workspaces/WorkspacesSidebarContainer.tsx
+@@ -6,7 +6,15 @@ import { useUserContext } from '@/shared/hooks/useUserContext';
+ import { useScratch } from '@/shared/hooks/useScratch';
+ import { useAllOrganizationProjects } from '@/shared/hooks/useAllOrganizationProjects';
+ import { useUserOrganizations } from '@/shared/hooks/useUserOrganizations';
+-import { ScratchType, type DraftWorkspaceData } from 'shared/types';
++import { useOrganizationSelection } from '@/shared/hooks/useOrganizationSelection';
++import { useAuth } from '@/shared/hooks/auth/useAuth';
++import { makeLocalApiRequest } from '@/shared/lib/localApiTransport';
++import {
++  MemberRole as MemberRoleEnum,
++  ScratchType,
++  type ApiResponse,
++  type DraftWorkspaceData,
++} from 'shared/types';
+ import type { Project } from 'shared/remote-types';
+ import { splitMessageToTitleDescription } from '@/shared/lib/string';
+ import { cn } from '@/shared/lib/utils';
+@@ -69,6 +77,8 @@ const DEFAULT_WORKSPACE_SORT = {
+ const PR_FILTER_OPTIONS: WorkspacePrFilter[] = ['all', 'has_pr', 'no_pr'];
+ 
+ const SORT_BY_OPTIONS: WorkspaceSortBy[] = ['updated_at', 'created_at'];
++const CREATOR_FILTER_MINE = '__mine__';
++const CREATOR_FILTER_ALL = '__all__';
+ 
+ interface WorkspacesSidebarContainerProps {
+   onScrollToBottom?: (behavior?: 'auto' | 'smooth') => void;
+@@ -251,6 +261,21 @@ function getWorkspaceSortTimestamp(
+   return toTimestamp(workspace.createdAt);
+ }
+ 
++function formatCreatorLabel(
++  ownerUserId: string,
++  currentUserId: string | null
++): string {
++  if (currentUserId && ownerUserId === currentUserId) {
++    return 'Mine';
++  }
++
++  if (ownerUserId.length <= 12) {
++    return ownerUserId;
++  }
++
++  return `${ownerUserId.slice(0, 8)}...`;
++}
++
+ export function WorkspacesSidebarContainer({
+   onScrollToBottom = () => {},
+ }: WorkspacesSidebarContainerProps) {
+@@ -279,9 +304,15 @@ export function WorkspacesSidebarContainer({
+   );
+   const [isSortDialogOpen, setIsSortDialogOpen] = useState(false);
+   const [isFilterDialogOpen, setIsFilterDialogOpen] = useState(false);
++  const [creatorFilter, setCreatorFilter] =
++    useState<string>(CREATOR_FILTER_MINE);
+   const { t } = useTranslation('common');
+   const sortDialogTitle = t('kanban.workspaceSidebar.sortButtonTitle');
+   const filterDialogTitle = t('kanban.workspaceSidebar.filterButtonTitle');
++  const creatorFilterLabel = t(
++    'kanban.workspaceSidebar.creatorFilterLabel',
++    'Creator'
++  );
+ 
+   const layoutMode: WorkspaceLayoutMode = isAccordionLayout
+     ? 'accordion'
+@@ -307,8 +338,11 @@ export function WorkspacesSidebarContainer({
+ 
+   // Remote data for project filter (all orgs)
+   const { workspaces: remoteWorkspaces } = useUserContext();
++  const { userId: currentUserId } = useAuth();
+   const { data: allRemoteProjects } = useAllOrganizationProjects();
+   const { data: orgsData } = useUserOrganizations();
++  const { selectedOrg } = useOrganizationSelection({ organizations: orgsData });
++  const isCurrentUserAdmin = selectedOrg?.user_role === MemberRoleEnum.ADMIN;
+   const organizations = useMemo(
+     () => orgsData?.organizations ?? [],
+     [orgsData?.organizations]
+@@ -325,6 +359,146 @@ export function WorkspacesSidebarContainer({
+     return map;
+   }, [remoteWorkspaces]);
+ 
++  // Map local workspace ID -> creator (remote owner user ID) when available
++  const remoteOwnerByLocalId = useMemo(() => {
++    const map = new Map<string, string>();
++    for (const rw of remoteWorkspaces) {
++      if (rw.local_workspace_id) {
++        map.set(rw.local_workspace_id, rw.owner_user_id);
++      }
++    }
++    return map;
++  }, [remoteWorkspaces]);
++
++  const [resolvedOwnerByLocalId, setResolvedOwnerByLocalId] = useState<
++    Record<string, string>
++  >({});
++  const [ownerLookupAttemptedIds, setOwnerLookupAttemptedIds] = useState<
++    Record<string, true>
++  >({});
++
++  const allWorkspaceIds = useMemo(
++    () =>
++      Array.from(
++        new Set([...activeWorkspaces, ...archivedWorkspaces].map((ws) => ws.id))
++      ),
++    [activeWorkspaces, archivedWorkspaces]
++  );
++
++  useEffect(() => {
++    if (!currentUserId || allWorkspaceIds.length === 0) {
++      return;
++    }
++
++    const idsToResolve = allWorkspaceIds.filter(
++      (workspaceId) =>
++        !remoteOwnerByLocalId.has(workspaceId) &&
++        !resolvedOwnerByLocalId[workspaceId] &&
++        !ownerLookupAttemptedIds[workspaceId]
++    );
++
++    if (idsToResolve.length === 0) {
++      return;
++    }
++
++    setOwnerLookupAttemptedIds((prev) => ({
++      ...prev,
++      ...Object.fromEntries(idsToResolve.map((id) => [id, true as const])),
++    }));
++
++    let cancelled = false;
++
++    void (async () => {
++      const ownerEntries = await Promise.all(
++        idsToResolve.map(async (workspaceId) => {
++          try {
++            const response = await makeLocalApiRequest(
++              `/api/remote/workspaces/by-local-id/${workspaceId}`
++            );
++            if (!response.ok) {
++              return null;
++            }
++
++            const payload = (await response.json()) as ApiResponse<{
++              owner_user_id?: string | null;
++            }>;
++
++            const ownerUserId = payload.data?.owner_user_id ?? null;
++            if (!ownerUserId) {
++              return null;
++            }
++
++            return { workspaceId, ownerUserId };
++          } catch {
++            return null;
++          }
++        })
++      );
++
++      if (cancelled) {
++        return;
++      }
++
++      const resolvedEntries = ownerEntries.filter(
++        (entry): entry is { workspaceId: string; ownerUserId: string } =>
++          entry !== null
++      );
++
++      if (resolvedEntries.length === 0) {
++        return;
++      }
++
++      setResolvedOwnerByLocalId((prev) => ({
++        ...prev,
++        ...Object.fromEntries(
++          resolvedEntries.map((entry) => [entry.workspaceId, entry.ownerUserId])
++        ),
++      }));
++    })();
++
++    return () => {
++      cancelled = true;
++    };
++  }, [
++    allWorkspaceIds,
++    currentUserId,
++    ownerLookupAttemptedIds,
++    remoteOwnerByLocalId,
++    resolvedOwnerByLocalId,
++  ]);
++
++  const ownerByLocalId = useMemo(() => {
++    const map = new Map(remoteOwnerByLocalId);
++    for (const [workspaceId, ownerUserId] of Object.entries(
++      resolvedOwnerByLocalId
++    )) {
++      if (!map.has(workspaceId)) {
++        map.set(workspaceId, ownerUserId);
++      }
++    }
++    return map;
++  }, [remoteOwnerByLocalId, resolvedOwnerByLocalId]);
++
++  const creatorFilterOptions = useMemo(() => {
++    const ownerIds = new Set(ownerByLocalId.values());
++    const options = [
++      { value: CREATOR_FILTER_MINE, label: 'Mine' },
++      { value: CREATOR_FILTER_ALL, label: 'All' },
++    ];
++
++    for (const ownerUserId of ownerIds) {
++      if (currentUserId && ownerUserId === currentUserId) {
++        continue;
++      }
++      options.push({
++        value: ownerUserId,
++        label: formatCreatorLabel(ownerUserId, currentUserId),
++      });
++    }
++
++    return options;
++  }, [ownerByLocalId, currentUserId]);
++
+   // Build org name lookup
+   const orgNameById = useMemo(() => {
+     const map = new Map<string, string>();
+@@ -389,6 +563,33 @@ export function WorkspacesSidebarContainer({
+   const hasNonDefaultSort =
+     workspaceSort.sortBy !== DEFAULT_WORKSPACE_SORT.sortBy ||
+     workspaceSort.sortOrder !== DEFAULT_WORKSPACE_SORT.sortOrder;
++  const effectiveCreatorFilter = useMemo(() => {
++    if (!currentUserId) {
++      return CREATOR_FILTER_ALL;
++    }
++
++    return isCurrentUserAdmin ? creatorFilter : CREATOR_FILTER_MINE;
++  }, [currentUserId, isCurrentUserAdmin, creatorFilter]);
++
++  const matchesCreatorFilter = useCallback(
++    (workspaceId: string) => {
++      if (effectiveCreatorFilter === CREATOR_FILTER_ALL) {
++        return true;
++      }
++
++      const ownerUserId = ownerByLocalId.get(workspaceId);
++      if (!ownerUserId) {
++        return false;
++      }
++
++      if (effectiveCreatorFilter === CREATOR_FILTER_MINE) {
++        return !!currentUserId && ownerUserId === currentUserId;
++      }
++
++      return ownerUserId === effectiveCreatorFilter;
++    },
++    [effectiveCreatorFilter, ownerByLocalId, currentUserId]
++  );
+ 
+   // Pagination state for infinite scroll
+   const [displayLimit, setDisplayLimit] = useState(PAGE_SIZE);
+@@ -396,7 +597,13 @@ export function WorkspacesSidebarContainer({
+   // Reset display limit when search, filter, or sort state changes
+   useEffect(() => {
+     setDisplayLimit(PAGE_SIZE);
+-  }, [searchQuery, showArchive, workspaceFilters, workspaceSort]);
++  }, [
++    searchQuery,
++    showArchive,
++    workspaceFilters,
++    workspaceSort,
++    effectiveCreatorFilter,
++  ]);
+ 
+   const searchLower = searchQuery.toLowerCase();
+   const isSearching = searchQuery.length > 0;
+@@ -405,6 +612,9 @@ export function WorkspacesSidebarContainer({
+   const filteredActiveWorkspaces = useMemo(() => {
+     let result = activeWorkspaces;
+ 
++    // Creator filter
++    result = result.filter((ws) => matchesCreatorFilter(ws.id));
++
+     // Project filter
+     if (workspaceFilters.projectIds.length > 0) {
+       const includeNoProject =
+@@ -436,11 +646,19 @@ export function WorkspacesSidebarContainer({
+     }
+ 
+     return result;
+-  }, [activeWorkspaces, workspaceFilters, remoteProjectByLocalId, searchLower]);
++  }, [
++    activeWorkspaces,
++    matchesCreatorFilter,
++    workspaceFilters,
++    remoteProjectByLocalId,
++    searchLower,
++  ]);
+ 
+   const filteredArchivedWorkspaces = useMemo(() => {
+     let result = archivedWorkspaces;
+ 
++    result = result.filter((ws) => matchesCreatorFilter(ws.id));
++
+     if (workspaceFilters.projectIds.length > 0) {
+       const includeNoProject =
+         workspaceFilters.projectIds.includes(NO_PROJECT_ID);
+@@ -471,6 +689,7 @@ export function WorkspacesSidebarContainer({
+     return result;
+   }, [
+     archivedWorkspaces,
++    matchesCreatorFilter,
+     workspaceFilters,
+     remoteProjectByLocalId,
+     searchLower,
+@@ -611,6 +830,15 @@ export function WorkspacesSidebarContainer({
+ 
+   const searchControls = (
+     <>
++      {isCurrentUserAdmin && (
++        <PropertyDropdown
++          value={creatorFilter}
++          options={creatorFilterOptions}
++          onChange={setCreatorFilter}
++          label={creatorFilterLabel}
++        />
++      )}
++
+       <div className="shrink-0">
+         <div className="flex items-stretch">
+           <IconButton
+diff --git a/packages/web-core/src/shared/hooks/useUserSystem.ts b/packages/web-core/src/shared/hooks/useUserSystem.ts
+index ee1118bb6..4df9fd472 100644
+--- a/packages/web-core/src/shared/hooks/useUserSystem.ts
++++ b/packages/web-core/src/shared/hooks/useUserSystem.ts
+@@ -18,6 +18,7 @@ export interface UserSystemState {
+   machineId: string | null;
+   loginStatus: LoginStatus | null;
+   remoteAuthDegraded: string | null;
++  sharedApiBase: string | null;
+ }
+ 
+ export interface UserSystemContextType {
+@@ -39,6 +40,7 @@ export interface UserSystemContextType {
+   machineId: string | null;
+   loginStatus: LoginStatus | null;
+   remoteAuthDegraded: string | null;
++  sharedApiBase: string | null;
+   setEnvironment: (env: Environment | null) => void;
+   setProfiles: (profiles: Record<string, ExecutorProfile> | null) => void;
+   setCapabilities: (caps: Record<string, BaseAgentCapability[]> | null) => void;
+diff --git a/packages/web-core/src/shared/hooks/useUserSystemController.ts b/packages/web-core/src/shared/hooks/useUserSystemController.ts
+index 7f578e989..6c5152bf5 100644
+--- a/packages/web-core/src/shared/hooks/useUserSystemController.ts
++++ b/packages/web-core/src/shared/hooks/useUserSystemController.ts
+@@ -44,6 +44,7 @@ export function useUserSystemController({
+   const machineId = userSystemInfo?.machine_id || null;
+   const loginStatus = userSystemInfo?.login_status || null;
+   const remoteAuthDegraded = userSystemInfo?.remote_auth_degraded || null;
++  const sharedApiBase = userSystemInfo?.shared_api_base || null;
+   const profiles =
+     (userSystemInfo?.executors as Record<string, ExecutorProfile> | null) ||
+     null;
+@@ -153,6 +154,7 @@ export function useUserSystemController({
+         machineId,
+         loginStatus,
+         remoteAuthDegraded,
++        sharedApiBase,
+       },
+       appVersion,
+       previewProxyPort,
+@@ -163,6 +165,7 @@ export function useUserSystemController({
+       machineId,
+       loginStatus,
+       remoteAuthDegraded,
++      sharedApiBase,
+       updateConfig,
+       saveConfig,
+       updateAndSaveConfig,
+@@ -182,6 +185,7 @@ export function useUserSystemController({
+       previewProxyPort,
+       loginStatus,
+       remoteAuthDegraded,
++      sharedApiBase,
+       profiles,
+       reloadSystem,
+       saveConfig,
+diff --git a/packages/web-core/src/shared/hooks/useWorkspaces.ts b/packages/web-core/src/shared/hooks/useWorkspaces.ts
+index 25be704a1..8d92b707e 100644
+--- a/packages/web-core/src/shared/hooks/useWorkspaces.ts
++++ b/packages/web-core/src/shared/hooks/useWorkspaces.ts
+@@ -46,6 +46,10 @@ export interface UseWorkspacesResult {
+   error: string | null;
+ }
+ 
++interface UseWorkspacesOptions {
++  enabled?: boolean;
++}
++
+ // State shape from the WebSocket stream
+ type WorkspacesState = {
+   workspaces: Record<string, WorkspaceWithStatus>;
+@@ -127,7 +131,10 @@ async function fetchWorkspaceSummariesByArchived(
+   }
+ }
+ 
+-export function useWorkspaces(): UseWorkspacesResult {
++export function useWorkspaces(
++  options: UseWorkspacesOptions = {}
++): UseWorkspacesResult {
++  const enabled = options.enabled ?? true;
+   const hostId = useHostId();
+ 
+   // Two separate WebSocket connections: one for active, one for archived
+@@ -146,7 +153,11 @@ export function useWorkspaces(): UseWorkspacesResult {
+     isConnected: activeIsConnected,
+     isInitialized: activeIsInitialized,
+     error: activeError,
+-  } = useJsonPatchWsStream<WorkspacesState>(activeEndpoint, true, initialData);
++  } = useJsonPatchWsStream<WorkspacesState>(
++    activeEndpoint,
++    enabled,
++    initialData
++  );
+ 
+   const {
+     data: archivedData,
+@@ -155,7 +166,7 @@ export function useWorkspaces(): UseWorkspacesResult {
+     error: archivedError,
+   } = useJsonPatchWsStream<WorkspacesState>(
+     archivedEndpoint,
+-    true,
++    enabled,
+     initialData
+   );
+ 
+@@ -165,7 +176,7 @@ export function useWorkspaces(): UseWorkspacesResult {
+     useQuery({
+       queryKey: workspaceSummaryKeys.byArchived(false, hostId),
+       queryFn: () => fetchWorkspaceSummariesByArchived(false, hostId),
+-      enabled: activeIsInitialized,
++      enabled: enabled && activeIsInitialized,
+       staleTime: 1000,
+       refetchInterval: 15000,
+       refetchOnWindowFocus: false,
+@@ -178,7 +189,7 @@ export function useWorkspaces(): UseWorkspacesResult {
+     useQuery({
+       queryKey: workspaceSummaryKeys.byArchived(true, hostId),
+       queryFn: () => fetchWorkspaceSummariesByArchived(true, hostId),
+-      enabled: archivedIsInitialized,
++      enabled: enabled && archivedIsInitialized,
+       staleTime: 1000,
+       refetchInterval: 15000,
+       refetchOnWindowFocus: false,
+@@ -219,13 +230,13 @@ export function useWorkspaces(): UseWorkspacesResult {
+   }, [archivedData, archivedSummaries]);
+ 
+   // isLoading is true when we haven't received initial data from either stream
+-  const isLoading = !activeIsInitialized || !archivedIsInitialized;
++  const isLoading = enabled && (!activeIsInitialized || !archivedIsInitialized);
+ 
+   // Combined connection status
+-  const isConnected = activeIsConnected && archivedIsConnected;
++  const isConnected = enabled && activeIsConnected && archivedIsConnected;
+ 
+   // Combined error (show first error if any)
+-  const error = activeError || archivedError;
++  const error = enabled ? activeError || archivedError : null;
+ 
+   return {
+     workspaces,
+diff --git a/packages/web-core/src/shared/providers/WorkspaceProvider.tsx b/packages/web-core/src/shared/providers/WorkspaceProvider.tsx
+index c7676abfb..845abff0f 100644
+--- a/packages/web-core/src/shared/providers/WorkspaceProvider.tsx
++++ b/packages/web-core/src/shared/providers/WorkspaceProvider.tsx
+@@ -13,6 +13,8 @@ import { useWorkspaceDiffStore } from '@/shared/stores/useWorkspaceDiffStore';
+ import type { DiffStats } from 'shared/types';
+ import { useAppNavigation } from '@/shared/hooks/useAppNavigation';
+ import { useCurrentAppDestination } from '@/shared/hooks/useCurrentAppDestination';
++import { useAuth } from '@/shared/hooks/auth/useAuth';
++import { useUserSystem } from '@/shared/hooks/useUserSystem';
+ 
+ import { WorkspaceContext } from '@/shared/hooks/useWorkspaceContext';
+ 
+@@ -25,6 +27,12 @@ export function WorkspaceProvider({ children }: WorkspaceProviderProps) {
+   const appNavigation = useAppNavigation();
+   const currentDestination = useCurrentAppDestination();
+   const queryClient = useQueryClient();
++  const { isSignedIn, isLoaded: authLoaded } = useAuth();
++  const { sharedApiBase } = useUserSystem();
++
++  const requiresWorkspaceAuth = Boolean(sharedApiBase);
++  const workspaceDataEnabled =
++    !requiresWorkspaceAuth || (authLoaded && isSignedIn);
+ 
+   const isCreateMode = currentDestination?.kind === 'workspaces-create';
+ 
+@@ -32,11 +40,11 @@ export function WorkspaceProvider({ children }: WorkspaceProviderProps) {
+     workspaces: activeWorkspaces,
+     archivedWorkspaces,
+     isLoading: isLoadingList,
+-  } = useWorkspaces();
++  } = useWorkspaces({ enabled: workspaceDataEnabled });
+ 
+   const { data: workspace, isLoading: isLoadingWorkspace } = useWorkspaceRecord(
+     workspaceId,
+-    { enabled: !!workspaceId && !isCreateMode }
++    { enabled: workspaceDataEnabled && !!workspaceId && !isCreateMode }
+   );
+ 
+   const {
+@@ -48,10 +56,12 @@ export function WorkspaceProvider({ children }: WorkspaceProviderProps) {
+     isLoading: isSessionsLoading,
+     isNewSessionMode,
+     startNewSession,
+-  } = useWorkspaceSessions(workspaceId, { enabled: !isCreateMode });
++  } = useWorkspaceSessions(workspaceId, {
++    enabled: workspaceDataEnabled && !isCreateMode,
++  });
+ 
+   const { repos, isLoading: isReposLoading } = useWorkspaceRepo(workspaceId, {
+-    enabled: !isCreateMode,
++    enabled: workspaceDataEnabled && !isCreateMode,
+   });
+ 
+   // TODO: Support multiple repos - currently only fetches comments from the primary repo.
+@@ -74,10 +84,13 @@ export function WorkspaceProvider({ children }: WorkspaceProviderProps) {
+   } = useGitHubComments({
+     workspaceId,
+     repoId: primaryRepoId,
+-    enabled: !isCreateMode && hasPrAttached,
++    enabled: workspaceDataEnabled && !isCreateMode && hasPrAttached,
+   });
+ 
+-  const { diffs } = useDiffStream(workspaceId ?? null, !isCreateMode);
++  const { diffs } = useDiffStream(
++    workspaceId ?? null,
++    workspaceDataEnabled && !isCreateMode
++  );
+ 
+   const diffPaths = useMemo(
+     () =>
+@@ -164,7 +177,7 @@ export function WorkspaceProvider({ children }: WorkspaceProviderProps) {
+   const isLoading = isLoadingList || isLoadingWorkspace;
+ 
+   useEffect(() => {
+-    if (!workspaceId || isCreateMode) return;
++    if (!workspaceDataEnabled || !workspaceId || isCreateMode) return;
+ 
+     workspacesApi
+       .markSeen(workspaceId)
+@@ -174,7 +187,7 @@ export function WorkspaceProvider({ children }: WorkspaceProviderProps) {
+       .catch((error) => {
+         console.warn('Failed to mark workspace as seen:', error);
+       });
+-  }, [workspaceId, isCreateMode, queryClient]);
++  }, [workspaceDataEnabled, workspaceId, isCreateMode, queryClient]);
+ 
+   const selectWorkspace = useCallback(
+     (id: string) => {
+-- 
+2.50.1
+

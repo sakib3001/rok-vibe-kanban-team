@@ -1,0 +1,13 @@
+diff --git a/crates/remote/Dockerfile b/crates/remote/Dockerfile
+index b61d6bf78..c0f9905e4 100644
+--- a/crates/remote/Dockerfile
++++ b/crates/remote/Dockerfile
+@@ -99,7 +99,7 @@ RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
+     --mount=type=cache,id=cargo-git,target=/usr/local/cargo/git \
+     --mount=type=cache,id=remote-target,target=/app/target \
+     --mount=type=ssh \
+-    cargo build ${FEATURES:+--locked} --release --manifest-path crates/remote/Cargo.toml ${FEATURES:+--features ${FEATURES}} \
++    cargo build --locked --release --manifest-path crates/remote/Cargo.toml ${FEATURES:+--features ${FEATURES}} \
+  && cp /app/target/release/${APP_NAME} /app/bin/${APP_NAME}
+ 
+ FROM debian:bookworm-slim AS runtime

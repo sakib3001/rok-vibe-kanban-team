@@ -1,0 +1,25 @@
+# Build artifacts
+*.tgz
+remote-web-dist/
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.serena/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Local publish credentials (never commit)
+scripts/publish-credentials.bashrc

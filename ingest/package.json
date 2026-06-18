@@ -1,0 +1,13 @@
+{
+  "name": "vibe-kanban-ingest",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Issue-ingestion sidecar for centralized Vibe Kanban. POST -> auto-create issue.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

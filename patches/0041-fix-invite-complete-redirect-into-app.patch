@@ -1,0 +1,36 @@
+From 3c7d1af8ed0d1ff7aa5fd4a63ba7bd3cff4b631f Mon Sep 17 00:00:00 2001
+From: Rokomari <dev@rokomari.com>
+Date: Thu, 18 Jun 2026 18:01:09 +0600
+Subject: [PATCH] fix: invite-complete 'Get started' links into the app, not
+ upstream docs
+
+---
+ packages/remote-web/src/pages/InvitationCompletePage.tsx | 8 +++-----
+ 1 file changed, 3 insertions(+), 5 deletions(-)
+
+diff --git a/packages/remote-web/src/pages/InvitationCompletePage.tsx b/packages/remote-web/src/pages/InvitationCompletePage.tsx
+index b0d133414..ad020ce00 100644
+--- a/packages/remote-web/src/pages/InvitationCompletePage.tsx
++++ b/packages/remote-web/src/pages/InvitationCompletePage.tsx
+@@ -93,15 +93,13 @@ export default function InvitationCompletePage() {
+     return (
+       <StatusCard title="Invitation accepted!">
+         <p className="mt-base text-sm text-normal">
+-          Your invitation is confirmed. You can now close this page.
++          Your invitation is confirmed. You&apos;re all set.
+         </p>
+         <a
+-          href="https://www.vibekanban.com/docs/getting-started"
+-          target="_blank"
+-          rel="noopener noreferrer"
++          href="/"
+           className="mt-double block w-full rounded-sm bg-brand px-base py-half text-center text-sm font-medium text-on-brand transition-colors hover:bg-brand-hover"
+         >
+-          Get started
++          Go to your workspace
+         </a>
+       </StatusCard>
+     );
+-- 
+2.43.0
+

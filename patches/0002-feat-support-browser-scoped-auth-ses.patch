@@ -1,0 +1,1096 @@
+From 01688b1ffae7a33d09fc710a84ffcd2bd104c1f4 Mon Sep 17 00:00:00 2001
+From: Riajul Islam <riajul@kahf.co>
+Date: Wed, 15 Apr 2026 12:01:11 +0000
+Subject: [PATCH] feat: support browser-scoped auth session
+
+---
+ crates/git/src/cli.rs                         |  30 +++
+ crates/git/src/lib.rs                         |  23 +++
+ crates/local-deployment/src/container.rs      | 143 +++++++++++++-
+ crates/local-deployment/src/lib.rs            |  81 ++++++--
+ crates/local-deployment/src/pty.rs            |   7 +
+ crates/server/src/error.rs                    |   5 +
+ crates/server/src/middleware/auth_session.rs  |  86 +++++++++
+ crates/server/src/middleware/mod.rs           |   2 +
+ crates/server/src/routes/mod.rs               |   4 +
+ crates/server/src/routes/terminal.rs          |  14 +-
+ crates/services/src/services/auth.rs          | 177 ++++++++++++++++--
+ .../src/services/oauth_credentials.rs         |   4 +
+ crates/services/src/services/remote_client.rs |  48 +++--
+ 13 files changed, 561 insertions(+), 63 deletions(-)
+ create mode 100644 crates/server/src/middleware/auth_session.rs
+
+diff --git a/crates/git/src/cli.rs b/crates/git/src/cli.rs
+index 0c8a80cf7..e612610d7 100644
+--- a/crates/git/src/cli.rs
++++ b/crates/git/src/cli.rs
+@@ -342,6 +342,36 @@ impl GitCli {
+         self.git(worktree_path, ["commit", "-m", message])?;
+         Ok(())
+     }
++
++    /// Commit staged changes while overriding author/committer identity.
++    pub fn commit_with_identity(
++        &self,
++        worktree_path: &Path,
++        message: &str,
++        name: &str,
++        email: &str,
++    ) -> Result<(), GitCliError> {
++        let envs = vec![
++            (
++                OsString::from("GIT_AUTHOR_NAME"),
++                OsString::from(name.to_string()),
++            ),
++            (
++                OsString::from("GIT_AUTHOR_EMAIL"),
++                OsString::from(email.to_string()),
++            ),
++            (
++                OsString::from("GIT_COMMITTER_NAME"),
++                OsString::from(name.to_string()),
++            ),
++            (
++                OsString::from("GIT_COMMITTER_EMAIL"),
++                OsString::from(email.to_string()),
++            ),
++        ];
++        self.git_with_env(worktree_path, ["commit", "-m", message], &envs)?;
++        Ok(())
++    }
+     /// Fetch a branch to the given remote using native git authentication.
+     pub fn fetch_with_refspec(
+         &self,
+diff --git a/crates/git/src/lib.rs b/crates/git/src/lib.rs
+index be9849b04..e176af70f 100644
+--- a/crates/git/src/lib.rs
++++ b/crates/git/src/lib.rs
+@@ -323,6 +323,29 @@ impl GitService {
+         Ok(true)
+     }
+ 
++    pub fn commit_as(
++        &self,
++        path: &Path,
++        message: &str,
++        name: &str,
++        email: &str,
++    ) -> Result<bool, GitServiceError> {
++        let git = GitCli::new();
++        let has_changes = git
++            .has_changes(path)
++            .map_err(|e| GitServiceError::InvalidRepository(format!("git status failed: {e}")))?;
++        if !has_changes {
++            tracing::debug!("No changes to commit!");
++            return Ok(false);
++        }
++
++        git.add_all(path)
++            .map_err(|e| GitServiceError::InvalidRepository(format!("git add failed: {e}")))?;
++        git.commit_with_identity(path, message, name, email)
++            .map_err(|e| GitServiceError::InvalidRepository(format!("git commit failed: {e}")))?;
++        Ok(true)
++    }
++
+     /// Get worktree diffs against a base commit
+     pub fn get_diffs(
+         &self,
+diff --git a/crates/local-deployment/src/container.rs b/crates/local-deployment/src/container.rs
+index d3fe28c72..093182f21 100644
+--- a/crates/local-deployment/src/container.rs
++++ b/crates/local-deployment/src/container.rs
+@@ -42,6 +42,7 @@ use serde_json::json;
+ use services::services::{
+     analytics::AnalyticsContext,
+     approvals::{Approvals, executor_approvals::ExecutorApprovalBridge},
++    auth::AuthContext,
+     config::{Config, DEFAULT_COMMIT_REMINDER_PROMPT},
+     container::{ContainerError, ContainerRef, ContainerService},
+     diff_stream::{self, DiffStreamHandle},
+@@ -61,7 +62,7 @@ use utils::{
+ use uuid::Uuid;
+ use workspace_manager::{RepoWorkspaceInput, WorkspaceError, WorkspaceManager};
+ 
+-use crate::{command, copy};
++use crate::{LocalDeployment, command, copy};
+ 
+ const WORKSPACE_TOUCH_DEBOUNCE: Duration = Duration::from_mins(2);
+ 
+@@ -84,7 +85,9 @@ pub struct LocalContainerService {
+     approvals: Approvals,
+     queued_message_service: QueuedMessageService,
+     notification_service: NotificationService,
++    auth_context: AuthContext,
+     remote_client: Option<RemoteClient>,
++    execution_auth_sessions: Arc<RwLock<HashMap<Uuid, Option<String>>>>,
+ }
+ 
+ impl LocalContainerService {
+@@ -99,6 +102,7 @@ impl LocalContainerService {
+         analytics: Option<AnalyticsContext>,
+         approvals: Approvals,
+         queued_message_service: QueuedMessageService,
++        auth_context: AuthContext,
+         remote_client: Option<RemoteClient>,
+     ) -> Self {
+         let child_store = Arc::new(RwLock::new(HashMap::new()));
+@@ -106,6 +110,7 @@ impl LocalContainerService {
+         let db_stream_handles = Arc::new(RwLock::new(HashMap::new()));
+         let exit_monitor_handles = Arc::new(RwLock::new(HashMap::new()));
+         let workspace_touch_times = Arc::new(RwLock::new(HashMap::new()));
++        let execution_auth_sessions = Arc::new(RwLock::new(HashMap::new()));
+         let notification_service = NotificationService::new(config.clone());
+ 
+         let container = LocalContainerService {
+@@ -124,7 +129,9 @@ impl LocalContainerService {
+             approvals,
+             queued_message_service,
+             notification_service,
++            auth_context,
+             remote_client,
++            execution_auth_sessions,
+         };
+ 
+         container.spawn_workspace_cleanup();
+@@ -238,6 +245,73 @@ impl LocalContainerService {
+         map.remove(id)
+     }
+ 
++    async fn remember_execution_auth_session(
++        &self,
++        execution_id: Uuid,
++        auth_session_id: Option<String>,
++    ) {
++        self.execution_auth_sessions
++            .write()
++            .await
++            .insert(execution_id, auth_session_id);
++    }
++
++    async fn auth_session_for_execution(&self, execution_id: Uuid) -> Option<String> {
++        self.execution_auth_sessions
++            .read()
++            .await
++            .get(&execution_id)
++            .cloned()
++            .flatten()
++    }
++
++    async fn take_execution_auth_session(&self, execution_id: &Uuid) -> Option<String> {
++        self.execution_auth_sessions
++            .write()
++            .await
++            .remove(execution_id)
++            .flatten()
++    }
++
++    async fn remote_client_for_execution(&self, execution_id: Uuid) -> Option<RemoteClient> {
++        let auth_session_id = self.auth_session_for_execution(execution_id).await;
++        self.remote_client
++            .clone()
++            .map(|client| client.with_session_id(auth_session_id))
++    }
++
++    async fn git_identity_for_auth_session(
++        &self,
++        auth_session_id: Option<String>,
++    ) -> Option<(String, String)> {
++        let mut profile = self
++            .auth_context
++            .cached_profile_for(auth_session_id.as_deref())
++            .await;
++
++        if profile.is_none()
++            && let Some(client) = self
++                .remote_client
++                .clone()
++                .map(|client| client.with_session_id(auth_session_id.clone()))
++            && let Ok(fetched_profile) = client.profile().await
++        {
++            self.auth_context
++                .set_profile_for(auth_session_id.as_deref(), fetched_profile.clone())
++                .await;
++            profile = Some(fetched_profile);
++        }
++
++        profile
++            .as_ref()
++            .and_then(LocalDeployment::git_identity_from_profile)
++    }
++
++    async fn git_identity_for_execution(&self, execution_id: Uuid) -> Option<(String, String)> {
++        let auth_session_id = self.auth_session_for_execution(execution_id).await;
++        self.git_identity_for_auth_session(auth_session_id).await
++    }
++
+     async fn cleanup_workspace(&self, workspace: &Workspace) {
+         let Some(container_ref) = &workspace.container_ref else {
+             return;
+@@ -448,7 +522,12 @@ impl LocalContainerService {
+     }
+ 
+     /// Commit changes to each repo. Logs failures but continues with other repos.
+-    fn commit_repos(&self, repos_with_changes: Vec<(Repo, PathBuf)>, message: &str) -> bool {
++    fn commit_repos(
++        &self,
++        repos_with_changes: Vec<(Repo, PathBuf)>,
++        message: &str,
++        git_identity: Option<&(String, String)>,
++    ) -> bool {
+         let mut any_committed = false;
+ 
+         for (repo, worktree_path) in repos_with_changes {
+@@ -458,7 +537,13 @@ impl LocalContainerService {
+                 &worktree_path
+             );
+ 
+-            match self.git().commit(&worktree_path, message) {
++            let commit_result = if let Some((name, email)) = git_identity {
++                self.git().commit_as(&worktree_path, message, name, email)
++            } else {
++                self.git().commit(&worktree_path, message)
++            };
++
++            match commit_result {
+                 Ok(true) => {
+                     any_committed = true;
+                     tracing::info!("Committed changes in repo '{}'", repo.name);
+@@ -594,7 +679,20 @@ impl LocalContainerService {
+ 
+                     if should_start_next {
+                         // If the process exited successfully, start the next action
+-                        if let Err(e) = container.try_start_next_action(&ctx).await {
++                        let next_action_result = if let Some(auth_session_id) =
++                            container.auth_session_for_execution(exec_id).await
++                        {
++                            container
++                                .auth_context
++                                .run_with_session(auth_session_id, async {
++                                    container.try_start_next_action(&ctx).await
++                                })
++                                .await
++                        } else {
++                            container.try_start_next_action(&ctx).await
++                        };
++
++                        if let Err(e) = next_action_result {
+                             tracing::error!("Failed to start next action after completion: {}", e);
+                         }
+                     } else {
+@@ -649,10 +747,20 @@ impl LocalContainerService {
+                             }
+ 
+                             // Execute the queued follow-up
+-                            if let Err(e) = container
+-                                .start_queued_follow_up(&ctx, &queued_msg.data)
+-                                .await
++                            let queued_follow_up_result = if let Some(auth_session_id) =
++                                container.auth_session_for_execution(exec_id).await
+                             {
++                                container
++                                    .auth_context
++                                    .run_with_session(auth_session_id, async {
++                                        container.start_queued_follow_up(&ctx, &queued_msg.data).await
++                                    })
++                                    .await
++                            } else {
++                                container.start_queued_follow_up(&ctx, &queued_msg.data).await
++                            };
++
++                            if let Err(e) = queued_follow_up_result {
+                                 tracing::error!("Failed to start queued follow-up: {}", e);
+                                 // Fall back to finalization if follow-up fails
+                                 container.finalize_task(&ctx).await;
+@@ -758,7 +866,7 @@ impl LocalContainerService {
+                 if matches!(
+                     &ctx.execution_process.run_reason,
+                     ExecutionProcessRunReason::CodingAgent
+-                ) && let Some(client) = &container.remote_client
++                ) && let Some(client) = container.remote_client_for_execution(exec_id).await
+                 {
+                     let stats = diff_stream::compute_diff_stats(
+                         &container.db.pool,
+@@ -772,7 +880,6 @@ impl LocalContainerService {
+                             .ok()
+                             .flatten()
+                             .and_then(|ws| ws.workspace.name);
+-                    let client = client.clone();
+                     let workspace_id = ctx.workspace.id;
+                     let archived = ctx.workspace.archived;
+                     tokio::spawn(async move {
+@@ -809,6 +916,7 @@ impl LocalContainerService {
+                 let _ = child.start_kill();
+             }
+             child_store.write().await.remove(&exec_id);
++            let _ = container.take_execution_auth_session(&exec_id).await;
+         })
+     }
+ 
+@@ -1361,6 +1469,17 @@ impl ContainerService for LocalContainerService {
+         // Always inject workspace/session context
+         env.insert("VK_WORKSPACE_ID", workspace.id.to_string());
+         env.insert("VK_WORKSPACE_BRANCH", &workspace.branch);
++        env.insert("VK_SESSION_ID", execution_process.session_id.to_string());
++        let auth_session_id = self.auth_context.current_session_id();
++        if let Some((name, email)) = self
++            .git_identity_for_auth_session(auth_session_id.clone())
++            .await
++        {
++            env.insert("GIT_AUTHOR_NAME", &name);
++            env.insert("GIT_AUTHOR_EMAIL", &email);
++            env.insert("GIT_COMMITTER_NAME", &name);
++            env.insert("GIT_COMMITTER_EMAIL", &email);
++        }
+ 
+         // Create the child and stream, add to execution tracker with timeout
+         let mut spawned = tokio::time::timeout(
+@@ -1386,6 +1505,9 @@ impl ContainerService for LocalContainerService {
+                 .await;
+         }
+ 
++        self.remember_execution_auth_session(execution_process.id, auth_session_id)
++            .await;
++
+         // Spawn unified exit monitor: watches OS exit and optional executor signal
+         let hn = self.spawn_exit_monitor(&execution_process.id, spawned.exit_signal);
+         self.add_exit_monitor_handle(execution_process.id, hn).await;
+@@ -1565,7 +1687,8 @@ impl ContainerService for LocalContainerService {
+             return Ok(false);
+         }
+ 
+-        Ok(self.commit_repos(repos_with_changes, &message))
++        let git_identity = self.git_identity_for_execution(ctx.execution_process.id).await;
++        Ok(self.commit_repos(repos_with_changes, &message, git_identity.as_ref()))
+     }
+ 
+     /// Copy files from the original project directory to the worktree.
+diff --git a/crates/local-deployment/src/lib.rs b/crates/local-deployment/src/lib.rs
+index 50e3f2c62..0f266952f 100644
+--- a/crates/local-deployment/src/lib.rs
++++ b/crates/local-deployment/src/lib.rs
+@@ -3,7 +3,7 @@ use std::{
+     sync::{Arc, OnceLock},
+ };
+ 
+-use api_types::LoginStatus;
++use api_types::{LoginStatus, ProfileResponse};
+ use async_trait::async_trait;
+ use client_info::ClientInfo;
+ use db::DBService;
+@@ -25,7 +25,6 @@ use services::services::{
+     file::FileService,
+     file_search::FileSearchCache,
+     filesystem::FilesystemService,
+-    oauth_credentials::OAuthCredentials,
+     pr_monitor::PrMonitorService,
+     queued_message::QueuedMessageService,
+     remote_client::{RemoteClient, RemoteClientError},
+@@ -85,6 +84,7 @@ pub struct LocalDeployment {
+ struct PendingHandoff {
+     provider: String,
+     app_verifier: String,
++    auth_session_id: Option<String>,
+ }
+ 
+ #[async_trait]
+@@ -160,13 +160,7 @@ impl Deployment for LocalDeployment {
+         let approvals = Approvals::new();
+         let queued_message_service = QueuedMessageService::new();
+ 
+-        let oauth_credentials = Arc::new(OAuthCredentials::new(credentials_path()));
+-        if let Err(e) = oauth_credentials.load().await {
+-            tracing::warn!(?e, "failed to load OAuth credentials");
+-        }
+-
+-        let profile_cache = Arc::new(RwLock::new(None));
+-        let auth_context = AuthContext::new(oauth_credentials.clone(), profile_cache.clone());
++        let auth_context = AuthContext::new(credentials_path());
+ 
+         let api_base = std::env::var("VK_SHARED_API_BASE")
+             .ok()
+@@ -230,6 +224,7 @@ impl Deployment for LocalDeployment {
+             analytics_ctx,
+             approvals.clone(),
+             queued_message_service.clone(),
++            auth_context.clone(),
+             remote_client.clone().ok(),
+         )
+         .await;
+@@ -399,7 +394,10 @@ impl LocalDeployment {
+     }
+ 
+     pub fn remote_client(&self) -> Result<RemoteClient, RemoteClientNotConfigured> {
+-        self.remote_client.clone()
++        let auth_session_id = self.auth_context.current_session_id();
++        self.remote_client
++            .clone()
++            .map(|client| client.with_session_id(auth_session_id))
+     }
+ 
+     pub async fn get_login_status(&self) -> LoginStatus {
+@@ -457,23 +455,80 @@ impl LocalDeployment {
+         provider: String,
+         app_verifier: String,
+     ) {
++        let auth_session_id = self.auth_context.current_session_id();
+         self.oauth_handoffs.write().await.insert(
+             handoff_id,
+             PendingHandoff {
+                 provider,
+                 app_verifier,
++                auth_session_id,
+             },
+         );
+     }
+ 
+     pub async fn take_oauth_handoff(&self, handoff_id: &Uuid) -> Option<(String, String)> {
+-        self.oauth_handoffs
+-            .write()
+-            .await
++        let auth_session_id = self.auth_context.current_session_id();
++        let mut handoffs = self.oauth_handoffs.write().await;
++        let should_take = handoffs
++            .get(handoff_id)
++            .map(|handoff| handoff.auth_session_id == auth_session_id)
++            .unwrap_or(false);
++
++        if !should_take {
++            return None;
++        }
++
++        handoffs
+             .remove(handoff_id)
+             .map(|state| (state.provider, state.app_verifier))
+     }
+ 
++    pub async fn current_git_identity(&self) -> Option<(String, String)> {
++        match self.get_login_status().await {
++            LoginStatus::LoggedIn { profile } => {
++                profile.as_ref().and_then(|p| Self::git_identity_from_profile(p))
++            }
++            LoginStatus::LoggedOut => None,
++        }
++    }
++
++    pub(crate) fn git_identity_from_profile(
++        profile: &ProfileResponse,
++    ) -> Option<(String, String)> {
++        let email = profile.email.trim().to_string();
++        if email.is_empty() {
++            return None;
++        }
++
++        let name = profile
++            .providers
++            .iter()
++            .find_map(|provider| {
++                provider
++                    .display_name
++                    .as_ref()
++                    .map(|value| value.trim().to_string())
++                    .filter(|value| !value.is_empty())
++            })
++            .or_else(|| {
++                profile
++                    .username
++                    .as_ref()
++                    .map(|value| value.trim().to_string())
++                    .filter(|value| !value.is_empty())
++            })
++            .or_else(|| {
++                email
++                    .split('@')
++                    .next()
++                    .map(str::trim)
++                    .map(str::to_string)
++                    .filter(|value| !value.is_empty())
++            })?;
++
++        Some((name, email))
++    }
++
+     pub fn pty(&self) -> &PtyService {
+         &self.pty
+     }
+diff --git a/crates/local-deployment/src/pty.rs b/crates/local-deployment/src/pty.rs
+index de1b2f53a..de8e808a6 100644
+--- a/crates/local-deployment/src/pty.rs
++++ b/crates/local-deployment/src/pty.rs
+@@ -50,6 +50,7 @@ impl PtyService {
+         working_dir: PathBuf,
+         cols: u16,
+         rows: u16,
++        git_identity: Option<(String, String)>,
+     ) -> Result<(Uuid, mpsc::UnboundedReceiver<Vec<u8>>), PtyError> {
+         let session_id = Uuid::new_v4();
+         let (output_tx, output_rx) = mpsc::unbounded_channel();
+@@ -93,6 +94,12 @@ impl PtyService {
+ 
+             cmd.env("TERM", "xterm-256color");
+             cmd.env("COLORTERM", "truecolor");
++            if let Some((name, email)) = &git_identity {
++                cmd.env("GIT_AUTHOR_NAME", name);
++                cmd.env("GIT_AUTHOR_EMAIL", email);
++                cmd.env("GIT_COMMITTER_NAME", name);
++                cmd.env("GIT_COMMITTER_EMAIL", email);
++            }
+ 
+             let child = pty_pair
+                 .slave
+diff --git a/crates/server/src/error.rs b/crates/server/src/error.rs
+index 8f16d458d..bba1c4e7e 100644
+--- a/crates/server/src/error.rs
++++ b/crates/server/src/error.rs
+@@ -310,6 +310,11 @@ fn remote_client_error(err: &RemoteClientError) -> ErrorInfo {
+         RemoteClientError::Url(_) => {
+             ErrorInfo::bad_request("RemoteClientError", "Remote service URL is invalid.")
+         }
++        RemoteClientError::TokenRefreshTimeout => ErrorInfo::with_status(
++            StatusCode::GATEWAY_TIMEOUT,
++            "RemoteClientError",
++            "Token refresh timed out. Please sign in again.",
++        ),
+     }
+ }
+ 
+diff --git a/crates/server/src/middleware/auth_session.rs b/crates/server/src/middleware/auth_session.rs
+new file mode 100644
+index 000000000..5f87483f6
+--- /dev/null
++++ b/crates/server/src/middleware/auth_session.rs
+@@ -0,0 +1,86 @@
++use axum::{
++    body::Body,
++    extract::State,
++    http::{
++        HeaderMap, HeaderValue, Request,
++        header::{COOKIE, SET_COOKIE},
++    },
++    middleware::Next,
++    response::Response,
++};
++use deployment::Deployment;
++use uuid::Uuid;
++
++use crate::DeploymentImpl;
++
++const AUTH_SESSION_COOKIE_NAME: &str = "vk_auth_session";
++const AUTH_SESSION_COOKIE_MAX_AGE_SECS: u64 = 365 * 24 * 60 * 60;
++
++pub async fn bind_auth_session(
++    State(deployment): State<DeploymentImpl>,
++    request: Request<Body>,
++    next: Next,
++) -> Response {
++    let (auth_session_id, should_set_cookie) = match parse_auth_session_cookie(request.headers()) {
++        Some(value) => (value, false),
++        None => (Uuid::new_v4().to_string(), true),
++    };
++    let secure_cookie = should_use_secure_cookie(request.headers());
++
++    deployment
++        .auth_context()
++        .run_with_session(auth_session_id.clone(), async move {
++            let mut response = next.run(request).await;
++
++            if should_set_cookie
++                && let Ok(cookie_header) =
++                    build_auth_session_cookie_header(&auth_session_id, secure_cookie)
++            {
++                response.headers_mut().append(SET_COOKIE, cookie_header);
++            }
++
++            response
++        })
++        .await
++}
++
++fn parse_auth_session_cookie(headers: &HeaderMap) -> Option<String> {
++    let cookies = headers.get(COOKIE)?.to_str().ok()?;
++    for fragment in cookies.split(';') {
++        let mut parts = fragment.trim().splitn(2, '=');
++        let Some(name) = parts.next().map(str::trim) else {
++            continue;
++        };
++        if name != AUTH_SESSION_COOKIE_NAME {
++            continue;
++        }
++
++        let value = parts.next().map(str::trim).unwrap_or_default();
++        if let Ok(parsed) = Uuid::parse_str(value) {
++            return Some(parsed.to_string());
++        }
++    }
++    None
++}
++
++fn should_use_secure_cookie(headers: &HeaderMap) -> bool {
++    headers
++        .get("x-forwarded-proto")
++        .and_then(|value| value.to_str().ok())
++        .and_then(|value| value.split(',').next())
++        .map(str::trim)
++        .is_some_and(|proto| proto.eq_ignore_ascii_case("https"))
++}
++
++fn build_auth_session_cookie_header(
++    auth_session_id: &str,
++    secure: bool,
++) -> Result<HeaderValue, axum::http::header::InvalidHeaderValue> {
++    let mut cookie = format!(
++        "{AUTH_SESSION_COOKIE_NAME}={auth_session_id}; Path=/; HttpOnly; SameSite=Lax; Max-Age={AUTH_SESSION_COOKIE_MAX_AGE_SECS}",
++    );
++    if secure {
++        cookie.push_str("; Secure");
++    }
++    HeaderValue::from_str(&cookie)
++}
+diff --git a/crates/server/src/middleware/mod.rs b/crates/server/src/middleware/mod.rs
+index 7526320cc..c910a44b4 100644
+--- a/crates/server/src/middleware/mod.rs
++++ b/crates/server/src/middleware/mod.rs
+@@ -1,9 +1,11 @@
++pub mod auth_session;
+ pub mod error_logging;
+ pub mod model_loaders;
+ pub mod origin;
+ pub mod relay_request_signature;
+ pub mod signed_ws;
+ 
++pub use auth_session::*;
+ pub use error_logging::*;
+ pub use model_loaders::*;
+ pub use origin::*;
+diff --git a/crates/server/src/routes/mod.rs b/crates/server/src/routes/mod.rs
+index decec5ead..cab8276c7 100644
+--- a/crates/server/src/routes/mod.rs
++++ b/crates/server/src/routes/mod.rs
+@@ -71,6 +71,10 @@ pub fn router(deployment: DeploymentImpl) -> IntoMakeService<Router> {
+         .merge(relay_auth::router())
+         .merge(host_relay::router(&deployment))
+         .merge(relay_signed_routes)
++        .layer(axum::middleware::from_fn_with_state(
++            deployment.clone(),
++            middleware::bind_auth_session,
++        ))
+         .layer(ValidateRequestHeaderLayer::custom(
+             middleware::validate_origin,
+         ))
+diff --git a/crates/server/src/routes/terminal.rs b/crates/server/src/routes/terminal.rs
+index ed1d64d1a..596de4d96 100644
+--- a/crates/server/src/routes/terminal.rs
++++ b/crates/server/src/routes/terminal.rs
+@@ -87,8 +87,17 @@ async fn terminal_ws(
+         }
+     }
+ 
++    let git_identity = deployment.current_git_identity().await;
++
+     Ok(ws.on_upgrade(move |socket| {
+-        handle_terminal_ws(socket, deployment, working_dir, query.cols, query.rows)
++        handle_terminal_ws(
++            socket,
++            deployment,
++            working_dir,
++            query.cols,
++            query.rows,
++            git_identity,
++        )
+     }))
+ }
+ 
+@@ -98,10 +107,11 @@ async fn handle_terminal_ws(
+     working_dir: PathBuf,
+     cols: u16,
+     rows: u16,
++    git_identity: Option<(String, String)>,
+ ) {
+     let (session_id, mut output_rx) = match deployment
+         .pty()
+-        .create_session(working_dir, cols, rows)
++        .create_session(working_dir, cols, rows, git_identity)
+         .await
+     {
+         Ok(result) => result,
+diff --git a/crates/services/src/services/auth.rs b/crates/services/src/services/auth.rs
+index ef73e99d9..ecda9cf80 100644
+--- a/crates/services/src/services/auth.rs
++++ b/crates/services/src/services/auth.rs
+@@ -1,68 +1,205 @@
+-use std::sync::Arc;
++use std::{
++    collections::HashMap,
++    path::{Path, PathBuf},
++    sync::Arc,
++};
+ 
+ use api_types::ProfileResponse;
+ use tokio::sync::{Mutex as TokioMutex, OwnedMutexGuard, RwLock};
+ 
+ use super::oauth_credentials::{Credentials, OAuthCredentials};
+ 
++const DEFAULT_AUTH_SESSION_ID: &str = "__default__";
++
++tokio::task_local! {
++    static AUTH_SESSION_ID: String;
++}
++
+ #[derive(Clone)]
+-pub struct AuthContext {
++struct SessionState {
+     oauth: Arc<OAuthCredentials>,
+     profile: Arc<RwLock<Option<ProfileResponse>>>,
+     remote_auth_degraded_slug: Arc<RwLock<Option<String>>>,
+     refresh_lock: Arc<TokioMutex<()>>,
+ }
+ 
++#[derive(Clone)]
++pub struct AuthContext {
++    base_credentials_path: Arc<PathBuf>,
++    session_states: Arc<RwLock<HashMap<String, SessionState>>>,
++}
++
+ impl AuthContext {
+-    pub fn new(
+-        oauth: Arc<OAuthCredentials>,
+-        profile: Arc<RwLock<Option<ProfileResponse>>>,
+-    ) -> Self {
++    pub fn new(base_credentials_path: PathBuf) -> Self {
+         Self {
+-            oauth,
+-            profile,
+-            remote_auth_degraded_slug: Arc::new(RwLock::new(None)),
+-            refresh_lock: Arc::new(TokioMutex::new(())),
++            base_credentials_path: Arc::new(base_credentials_path),
++            session_states: Arc::new(RwLock::new(HashMap::new())),
+         }
+     }
+ 
++    pub async fn run_with_session<F, T>(&self, session_id: String, future: F) -> T
++    where
++        F: std::future::Future<Output = T>,
++    {
++        AUTH_SESSION_ID.scope(session_id, future).await
++    }
++
++    pub fn current_session_id(&self) -> Option<String> {
++        AUTH_SESSION_ID.try_with(Clone::clone).ok()
++    }
++
+     pub async fn get_credentials(&self) -> Option<Credentials> {
+-        self.oauth.get().await
++        let current_session_id = self.current_session_id();
++        self.get_credentials_for(current_session_id.as_deref()).await
++    }
++
++    pub async fn get_credentials_for(&self, session_id: Option<&str>) -> Option<Credentials> {
++        self.session_state_for(session_id).await.oauth.get().await
+     }
+ 
+     pub async fn save_credentials(&self, creds: &Credentials) -> std::io::Result<()> {
+-        self.oauth.save(creds).await
++        let current_session_id = self.current_session_id();
++        self.save_credentials_for(current_session_id.as_deref(), creds)
++            .await
++    }
++
++    pub async fn save_credentials_for(
++        &self,
++        session_id: Option<&str>,
++        creds: &Credentials,
++    ) -> std::io::Result<()> {
++        self.session_state_for(session_id).await.oauth.save(creds).await
+     }
+ 
+     pub async fn clear_credentials(&self) -> std::io::Result<()> {
+-        self.oauth.clear().await
++        let current_session_id = self.current_session_id();
++        self.clear_credentials_for(current_session_id.as_deref()).await
++    }
++
++    pub async fn clear_credentials_for(&self, session_id: Option<&str>) -> std::io::Result<()> {
++        self.session_state_for(session_id).await.oauth.clear().await
+     }
+ 
+     pub async fn remote_auth_degraded_slug(&self) -> Option<String> {
+-        self.remote_auth_degraded_slug.read().await.clone()
++        let current_session_id = self.current_session_id();
++        self.session_state_for(current_session_id.as_deref())
++            .await
++            .remote_auth_degraded_slug
++            .read()
++            .await
++            .clone()
+     }
+ 
+     pub async fn set_remote_auth_degraded_slug(&self, slug: impl Into<String>) {
+-        *self.remote_auth_degraded_slug.write().await = Some(slug.into());
++        let current_session_id = self.current_session_id();
++        *self
++            .session_state_for(current_session_id.as_deref())
++            .await
++            .remote_auth_degraded_slug
++            .write()
++            .await = Some(slug.into());
+     }
+ 
+     pub async fn clear_remote_auth_degraded_slug(&self) {
+-        *self.remote_auth_degraded_slug.write().await = None;
++        let current_session_id = self.current_session_id();
++        *self
++            .session_state_for(current_session_id.as_deref())
++            .await
++            .remote_auth_degraded_slug
++            .write()
++            .await = None;
+     }
+ 
+     pub async fn cached_profile(&self) -> Option<ProfileResponse> {
+-        self.profile.read().await.clone()
++        let current_session_id = self.current_session_id();
++        self.cached_profile_for(current_session_id.as_deref()).await
++    }
++
++    pub async fn cached_profile_for(&self, session_id: Option<&str>) -> Option<ProfileResponse> {
++        self.session_state_for(session_id).await.profile.read().await.clone()
+     }
+ 
+     pub async fn set_profile(&self, profile: ProfileResponse) {
+-        *self.profile.write().await = Some(profile)
++        let current_session_id = self.current_session_id();
++        self.set_profile_for(current_session_id.as_deref(), profile).await;
++    }
++
++    pub async fn set_profile_for(&self, session_id: Option<&str>, profile: ProfileResponse) {
++        *self.session_state_for(session_id).await.profile.write().await = Some(profile);
+     }
+ 
+     pub async fn clear_profile(&self) {
+-        *self.profile.write().await = None
++        let current_session_id = self.current_session_id();
++        self.clear_profile_for(current_session_id.as_deref()).await;
++    }
++
++    pub async fn clear_profile_for(&self, session_id: Option<&str>) {
++        *self.session_state_for(session_id).await.profile.write().await = None;
+     }
+ 
+     pub async fn refresh_guard(&self) -> OwnedMutexGuard<()> {
+-        self.refresh_lock.clone().lock_owned().await
++        let current_session_id = self.current_session_id();
++        self.refresh_guard_for(current_session_id.as_deref()).await
++    }
++
++    pub async fn refresh_guard_for(&self, session_id: Option<&str>) -> OwnedMutexGuard<()> {
++        self.session_state_for(session_id)
++            .await
++            .refresh_lock
++            .clone()
++            .lock_owned()
++            .await
++    }
++
++    fn normalize_session_id(session_id: Option<&str>) -> String {
++        session_id
++            .map(str::trim)
++            .filter(|value| !value.is_empty())
++            .unwrap_or(DEFAULT_AUTH_SESSION_ID)
++            .to_string()
++    }
++
++    fn credentials_path_for_session(&self, session_id: &str) -> PathBuf {
++        if session_id == DEFAULT_AUTH_SESSION_ID {
++            return self.base_credentials_path.as_ref().clone();
++        }
++
++        let parent_dir = self
++            .base_credentials_path
++            .parent()
++            .map(Path::to_path_buf)
++            .unwrap_or_else(|| PathBuf::from("."));
++        parent_dir
++            .join("credentials")
++            .join(format!("{session_id}.json"))
++    }
++
++    async fn session_state_for(&self, session_id: Option<&str>) -> SessionState {
++        let session_id = Self::normalize_session_id(session_id);
++
++        if let Some(state) = self.session_states.read().await.get(&session_id).cloned() {
++            return state;
++        }
++
++        let oauth = Arc::new(OAuthCredentials::new(
++            self.credentials_path_for_session(&session_id),
++        ));
++        if let Err(error) = oauth.load().await {
++            tracing::warn!(?error, session_id = %session_id, "failed to load OAuth credentials");
++        }
++
++        let state = SessionState {
++            oauth,
++            profile: Arc::new(RwLock::new(None)),
++            remote_auth_degraded_slug: Arc::new(RwLock::new(None)),
++            refresh_lock: Arc::new(TokioMutex::new(())),
++        };
++
++        let mut session_states = self.session_states.write().await;
++        if let Some(existing_state) = session_states.get(&session_id).cloned() {
++            return existing_state;
++        }
++        session_states.insert(session_id, state.clone());
++        state
+     }
+ }
+diff --git a/crates/services/src/services/oauth_credentials.rs b/crates/services/src/services/oauth_credentials.rs
+index c5dee0fbf..13ae3391b 100644
+--- a/crates/services/src/services/oauth_credentials.rs
++++ b/crates/services/src/services/oauth_credentials.rs
+@@ -95,6 +95,10 @@ impl OAuthCredentials {
+     }
+ 
+     async fn save_to_file(&self, creds: &StoredCredentials) -> std::io::Result<()> {
++        if let Some(parent) = self.path.parent() {
++            std::fs::create_dir_all(parent)?;
++        }
++
+         let tmp = self.path.with_extension("tmp");
+ 
+         let file = {
+diff --git a/crates/services/src/services/remote_client.rs b/crates/services/src/services/remote_client.rs
+index d98718c35..ab4ef94d2 100644
+--- a/crates/services/src/services/remote_client.rs
++++ b/crates/services/src/services/remote_client.rs
+@@ -51,6 +51,8 @@ pub enum RemoteClientError {
+     Storage(String),
+     #[error("invalid access token: {0}")]
+     Token(String),
++    #[error("token refresh timed out")]
++    TokenRefreshTimeout,
+ }
+ 
+ impl RemoteClientError {
+@@ -143,6 +145,7 @@ pub struct RemoteClient {
+     base: Url,
+     http: Client,
+     auth_context: AuthContext,
++    session_id: Option<String>,
+ }
+ 
+ impl std::fmt::Debug for RemoteClient {
+@@ -161,6 +164,7 @@ impl Clone for RemoteClient {
+             base: self.base.clone(),
+             http: self.http.clone(),
+             auth_context: self.auth_context.clone(),
++            session_id: self.session_id.clone(),
+         }
+     }
+ }
+@@ -168,6 +172,7 @@ impl Clone for RemoteClient {
+ impl RemoteClient {
+     const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+     const TOKEN_REFRESH_LEEWAY_SECS: i64 = 20;
++    const TOKEN_REFRESH_REQUEST_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+ 
+     pub fn new(base_url: &str, auth_context: AuthContext) -> Result<Self, RemoteClientError> {
+         let base = Url::parse(base_url).map_err(|e| RemoteClientError::Url(e.to_string()))?;
+@@ -187,9 +192,15 @@ impl RemoteClient {
+             base,
+             http,
+             auth_context,
++            session_id: None,
+         })
+     }
+ 
++    pub fn with_session_id(mut self, session_id: Option<String>) -> Self {
++        self.session_id = session_id;
++        self
++    }
++
+     /// Returns a valid access token, refreshing when it's about to expire.
+     fn require_token(
+         &self,
+@@ -197,10 +208,11 @@ impl RemoteClient {
+         Box<dyn std::future::Future<Output = Result<String, RemoteClientError>> + Send + '_>,
+     > {
+         Box::pin(async move {
++            let session_id = self.session_id.as_deref();
+             let leeway = ChronoDuration::seconds(Self::TOKEN_REFRESH_LEEWAY_SECS);
+             let creds = self
+                 .auth_context
+-                .get_credentials()
++                .get_credentials_for(session_id)
+                 .await
+                 .ok_or(RemoteClientError::Auth)?;
+ 
+@@ -211,10 +223,10 @@ impl RemoteClient {
+             }
+ 
+             let refreshed = {
+-                let _refresh_guard = self.auth_context.refresh_guard().await;
++                let _refresh_guard = self.auth_context.refresh_guard_for(session_id).await;
+                 let latest = self
+                     .auth_context
+-                    .get_credentials()
++                    .get_credentials_for(session_id)
+                     .await
+                     .ok_or(RemoteClientError::Auth)?;
+                 if let Some(token) = latest.access_token.as_ref()
+@@ -224,31 +236,31 @@ impl RemoteClient {
+                     return Ok(token.clone());
+                 }
+ 
+-                self.refresh_credentials(&latest).await
++                self.refresh_credentials(session_id, &latest).await
+             };
+ 
+             match refreshed {
+-                Ok(updated) => {
+-                    self.auth_context.clear_remote_auth_degraded_slug().await;
+-                    updated.access_token.ok_or(RemoteClientError::Auth)
+-                }
+-                Err(err) if err.is_definitive_auth_failure() => {
+-                    let _ = self.auth_context.clear_credentials().await;
+-                    self.auth_context.clear_remote_auth_degraded_slug().await;
+-                    Err(err)
++                Ok(updated) => updated.access_token.ok_or(RemoteClientError::Auth),
++                Err(RemoteClientError::Auth) => {
++                    let _ = self.auth_context.clear_credentials_for(session_id).await;
++                    Err(RemoteClientError::Auth)
+                 }
+-                Err(err) => {
+-                    if let Some(slug) = err.degraded_slug() {
+-                        self.auth_context.set_remote_auth_degraded_slug(slug).await;
+-                    }
+-                    Err(err)
++                Err(RemoteClientError::TokenRefreshTimeout) => {
++                    tracing::error!(
++                        "Refresh token request timed out after {} minutes. Discarding the refresh token and forcing re-login.",
++                        Self::TOKEN_REFRESH_REQUEST_TIMEOUT.as_secs() / 60
++                    );
++                    let _ = self.auth_context.clear_credentials_for(session_id).await;
++                    Err(RemoteClientError::TokenRefreshTimeout)
+                 }
++                Err(e) => Err(e),
+             }
+         })
+     }
+ 
+     async fn refresh_credentials(
+         &self,
++        session_id: Option<&str>,
+         creds: &Credentials,
+     ) -> Result<Credentials, RemoteClientError> {
+         let response = self.refresh_token_request(&creds.refresh_token).await?;
+@@ -262,7 +274,7 @@ impl RemoteClient {
+             expires_at: Some(expires_at),
+         };
+         self.auth_context
+-            .save_credentials(&new_creds)
++            .save_credentials_for(session_id, &new_creds)
+             .await
+             .map_err(|e| RemoteClientError::Storage(e.to_string()))?;
+         self.auth_context.clear_remote_auth_degraded_slug().await;
+-- 
+2.50.1
+

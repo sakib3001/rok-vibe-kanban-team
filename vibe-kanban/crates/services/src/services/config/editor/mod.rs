@@ -1,0 +1,457 @@
+use std::{path::Path, str::FromStr};
+
+use executors::{command::CommandBuilder, executors::ExecutorError};
+use serde::{Deserialize, Serialize};
+use strum_macros::{EnumIter, EnumString};
+use thiserror::Error;
+use ts_rs::TS;
+use url::Url;
+
+fn default_auto_install_extension() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, Error)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[ts(tag = "type", rename_all = "snake_case")]
+pub enum EditorOpenError {
+    #[error("Editor executable '{executable}' not found in PATH")]
+    ExecutableNotFound {
+        executable: String,
+        editor_type: EditorType,
+    },
+    #[error("Editor command for {editor_type:?} is invalid: {details}")]
+    InvalidCommand {
+        details: String,
+        editor_type: EditorType,
+    },
+    #[error("Failed to launch '{executable}' for {editor_type:?}: {details}")]
+    LaunchFailed {
+        executable: String,
+        details: String,
+        editor_type: EditorType,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct EditorConfig {
+    editor_type: EditorType,
+    custom_command: Option<String>,
+    #[serde(default)]
+    remote_ssh_host: Option<String>,
+    #[serde(default)]
+    remote_ssh_user: Option<String>,
+    #[serde(default = "default_auto_install_extension")]
+    auto_install_extension: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS, EnumString, EnumIter)]
+#[ts(use_ts_enum)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
+pub enum EditorType {
+    VsCode,
+    VsCodeInsiders,
+    Cursor,
+    Windsurf,
+    IntelliJ,
+    Zed,
+    Xcode,
+    GoogleAntigravity,
+    CodeServer,
+    Custom,
+}
+
+impl Default for EditorConfig {
+    fn default() -> Self {
+        Self {
+            editor_type: EditorType::VsCode,
+            custom_command: None,
+            remote_ssh_host: None,
+            remote_ssh_user: None,
+            auto_install_extension: true,
+        }
+    }
+}
+
+impl EditorConfig {
+    /// Create a new EditorConfig. This is primarily used by version migrations.
+    pub fn new(
+        editor_type: EditorType,
+        custom_command: Option<String>,
+        remote_ssh_host: Option<String>,
+        remote_ssh_user: Option<String>,
+        auto_install_extension: bool,
+    ) -> Self {
+        Self {
+            editor_type,
+            custom_command,
+            remote_ssh_host,
+            remote_ssh_user,
+            auto_install_extension,
+        }
+    }
+
+    pub fn with_environment_overrides(&self) -> Self {
+        self.with_environment_values(
+            std::env::var("VIBE_KANBAN_EDITOR_TYPE")
+                .or_else(|_| std::env::var("VIBE_KANBAN_EDITOR"))
+                .ok()
+                .as_deref(),
+            std::env::var("VIBE_KANBAN_CODE_SERVER_URL")
+                .or_else(|_| std::env::var("CODE_SERVER_URL"))
+                .ok()
+                .as_deref(),
+        )
+    }
+
+    fn with_environment_values(
+        &self,
+        editor_type: Option<&str>,
+        code_server_url: Option<&str>,
+    ) -> Self {
+        let parsed_editor_type = editor_type.and_then(|value| EditorType::from_str(value).ok());
+        let code_server_url = code_server_url
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+
+        if parsed_editor_type.is_none() && code_server_url.is_none() {
+            return self.clone();
+        }
+
+        let mut config = self.clone();
+        if let Some(editor_type) = parsed_editor_type {
+            config.editor_type = editor_type;
+        } else if code_server_url.is_some() {
+            config.editor_type = EditorType::CodeServer;
+        }
+
+        if let Some(code_server_url) = code_server_url {
+            config.custom_command = Some(code_server_url);
+        }
+
+        config
+    }
+
+    fn get_command(&self) -> CommandBuilder {
+        let base_command = match &self.editor_type {
+            EditorType::VsCode => "code",
+            EditorType::VsCodeInsiders => "code-insiders",
+            EditorType::Cursor => "cursor",
+            EditorType::Windsurf => "windsurf",
+            EditorType::IntelliJ => "idea",
+            EditorType::Zed => "zed",
+            EditorType::Xcode => "xed",
+            EditorType::GoogleAntigravity => "antigravity",
+            EditorType::CodeServer => "code-server",
+            EditorType::Custom => {
+                // Custom editor - use user-provided command or fallback to VSCode
+                self.custom_command.as_deref().unwrap_or("code")
+            }
+        };
+        CommandBuilder::new(base_command)
+    }
+
+    /// Resolve the editor command to an executable path and args.
+    /// This is shared logic used by both check_availability() and spawn_local().
+    async fn resolve_command(&self) -> Result<(std::path::PathBuf, Vec<String>), EditorOpenError> {
+        let command_builder = self.get_command();
+        let command_parts =
+            command_builder
+                .build_initial()
+                .map_err(|e| EditorOpenError::InvalidCommand {
+                    details: e.to_string(),
+                    editor_type: self.editor_type.clone(),
+                })?;
+
+        let (executable, args) = command_parts.into_resolved().await.map_err(|e| match e {
+            ExecutorError::ExecutableNotFound { program } => EditorOpenError::ExecutableNotFound {
+                executable: program,
+                editor_type: self.editor_type.clone(),
+            },
+            _ => EditorOpenError::InvalidCommand {
+                details: e.to_string(),
+                editor_type: self.editor_type.clone(),
+            },
+        })?;
+
+        Ok((executable, args))
+    }
+
+    /// Check if the editor is available on the system.
+    /// Uses the same command resolution logic as spawn_local().
+    pub async fn check_availability(&self) -> bool {
+        if matches!(self.editor_type, EditorType::CodeServer) {
+            return self.code_server_url_base().is_ok();
+        }
+        self.resolve_command().await.is_ok()
+    }
+
+    fn should_auto_install_extension(&self) -> bool {
+        self.auto_install_extension
+            && matches!(
+                self.editor_type,
+                EditorType::VsCode
+                    | EditorType::VsCodeInsiders
+                    | EditorType::Cursor
+                    | EditorType::CodeServer
+            )
+    }
+
+    async fn try_install_extension(&self) {
+        let Ok((executable, args)) = self.resolve_command().await else {
+            return;
+        };
+
+        use utils::command_ext::NoWindowExt;
+        let mut cmd = std::process::Command::new(&executable);
+        cmd.args(&args)
+            .arg("--install-extension")
+            .arg("bloop.vibe-kanban");
+        let _ = cmd.no_window().spawn();
+    }
+
+    pub async fn open_file(&self, path: &Path) -> Result<Option<String>, EditorOpenError> {
+        if let Some(url) = self.remote_url(path) {
+            return Ok(Some(url));
+        }
+
+        if matches!(self.editor_type, EditorType::CodeServer) {
+            if self.should_auto_install_extension() {
+                self.try_install_extension().await;
+            }
+            let url = self.code_server_url(path)?;
+            return Ok(Some(url));
+        }
+        if self.should_auto_install_extension() {
+            self.try_install_extension().await;
+        }
+        self.spawn_local(path).await?;
+        Ok(None)
+    }
+
+    fn code_server_url_base(&self) -> Result<Url, EditorOpenError> {
+        if !matches!(self.editor_type, EditorType::CodeServer) {
+            return Err(EditorOpenError::InvalidCommand {
+                details: "Code Server URL is only valid for CODE_SERVER editor type".to_string(),
+                editor_type: self.editor_type.clone(),
+            });
+        }
+
+        let command = self
+            .custom_command
+            .as_deref()
+            .map(str::trim)
+            .ok_or_else(|| EditorOpenError::InvalidCommand {
+                details: "Code Server URL is required".to_string(),
+                editor_type: self.editor_type.clone(),
+            })?;
+
+        if command.is_empty() {
+            return Err(EditorOpenError::InvalidCommand {
+                details: "Code Server URL is required".to_string(),
+                editor_type: self.editor_type.clone(),
+            });
+        }
+
+        let url = Url::parse(command).map_err(|e| EditorOpenError::InvalidCommand {
+            details: format!("Invalid Code Server URL: {e}"),
+            editor_type: self.editor_type.clone(),
+        })?;
+
+        match url.scheme() {
+            "http" | "https" => Ok(url),
+            _ => Err(EditorOpenError::InvalidCommand {
+                details: "Code Server URL must start with http:// or https://".to_string(),
+                editor_type: self.editor_type.clone(),
+            }),
+        }
+    }
+
+    fn code_server_url(&self, path: &Path) -> Result<String, EditorOpenError> {
+        let mut url = self.code_server_url_base()?;
+        let folder_path = if path.is_file() {
+            path.parent().unwrap_or(path)
+        } else {
+            path
+        };
+
+        url.query_pairs_mut()
+            .append_pair("folder", &folder_path.to_string_lossy());
+        Ok(url.to_string())
+    }
+
+    fn remote_url(&self, path: &Path) -> Option<String> {
+        let remote_host = self.remote_ssh_host.as_ref()?;
+        let user_part = self
+            .remote_ssh_user
+            .as_ref()
+            .map(|u| format!("{u}@"))
+            .unwrap_or_default();
+        let path_str = path.to_string_lossy();
+
+        let scheme = match self.editor_type {
+            EditorType::VsCode => "vscode",
+            EditorType::VsCodeInsiders => "vscode-insiders",
+            EditorType::Cursor => "cursor",
+            EditorType::Windsurf => "windsurf",
+            EditorType::GoogleAntigravity => "antigravity",
+            EditorType::Zed => {
+                return Some(format!("zed://ssh/{user_part}{remote_host}{path_str}"));
+            }
+            _ => return None,
+        };
+
+        // files must contain a line and column number
+        let line_col = if path.is_file() { ":1:1" } else { "" };
+        Some(format!(
+            "{scheme}://vscode-remote/ssh-remote+{user_part}{remote_host}{path_str}{line_col}?windowId=_blank"
+        ))
+    }
+
+    pub async fn spawn_local(&self, path: &Path) -> Result<(), EditorOpenError> {
+        let (executable, args) = self.resolve_command().await?;
+
+        use utils::command_ext::NoWindowExt;
+        let mut cmd = std::process::Command::new(&executable);
+        cmd.args(&args).arg(path);
+        cmd.no_window()
+            .spawn()
+            .map_err(|e| EditorOpenError::LaunchFailed {
+                executable: executable.to_string_lossy().into_owned(),
+                details: e.to_string(),
+                editor_type: self.editor_type.clone(),
+            })?;
+        Ok(())
+    }
+
+    pub fn with_override(&self, editor_type_str: Option<&str>) -> Self {
+        if let Some(editor_type_str) = editor_type_str {
+            let editor_type =
+                EditorType::from_str(editor_type_str).unwrap_or(self.editor_type.clone());
+            EditorConfig {
+                editor_type,
+                custom_command: self.custom_command.clone(),
+                remote_ssh_host: self.remote_ssh_host.clone(),
+                remote_ssh_user: self.remote_ssh_user.clone(),
+                auto_install_extension: self.auto_install_extension,
+            }
+        } else {
+            self.clone()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use tempfile::tempdir;
+    use url::Url;
+
+    use super::{EditorConfig, EditorOpenError, EditorType};
+
+    #[test]
+    fn code_server_url_requires_http_or_https_scheme() {
+        let config = EditorConfig::new(
+            EditorType::CodeServer,
+            Some("code-server://workspace".to_string()),
+            None,
+            None,
+            false,
+        );
+
+        let result = config.code_server_url_base();
+        assert!(matches!(
+            result,
+            Err(EditorOpenError::InvalidCommand { .. })
+        ));
+    }
+
+    #[test]
+    fn code_server_url_is_required() {
+        let config = EditorConfig::new(EditorType::CodeServer, None, None, None, false);
+
+        let result = config.code_server_url_base();
+        assert!(matches!(
+            result,
+            Err(EditorOpenError::InvalidCommand { .. })
+        ));
+    }
+
+    #[test]
+    fn code_server_url_for_directory_sets_folder_query() {
+        let dir = tempdir().expect("tempdir");
+        let repo_path = dir.path().join("repo");
+        fs::create_dir_all(&repo_path).expect("create repo dir");
+
+        let config = EditorConfig::new(
+            EditorType::CodeServer,
+            Some("https://code-server.example.com/".to_string()),
+            None,
+            None,
+            false,
+        );
+
+        let url = config.code_server_url(&repo_path).expect("code server url");
+        let parsed = Url::parse(&url).expect("valid url");
+        let folder = parsed
+            .query_pairs()
+            .find_map(|(k, v)| (k == "folder").then(|| v.to_string()))
+            .expect("folder query exists");
+
+        assert_eq!(folder, repo_path.to_string_lossy());
+    }
+
+    #[test]
+    fn code_server_url_for_file_uses_parent_directory() {
+        let dir = tempdir().expect("tempdir");
+        let repo_path = dir.path().join("repo");
+        fs::create_dir_all(&repo_path).expect("create repo dir");
+        let file_path = repo_path.join("src/main.rs");
+        fs::create_dir_all(file_path.parent().expect("parent path")).expect("create file parent");
+        fs::write(&file_path, "fn main() {}\n").expect("write file");
+
+        let config = EditorConfig::new(
+            EditorType::CodeServer,
+            Some("https://code-server.example.com/?theme=dark".to_string()),
+            None,
+            None,
+            false,
+        );
+
+        let url = config.code_server_url(&file_path).expect("code server url");
+        let parsed = Url::parse(&url).expect("valid url");
+        let folder = parsed
+            .query_pairs()
+            .find_map(|(k, v)| (k == "folder").then(|| v.to_string()))
+            .expect("folder query exists");
+
+        assert_eq!(folder, repo_path.join("src").to_string_lossy());
+    }
+
+    #[test]
+    fn environment_code_server_url_selects_code_server_editor() {
+        let config = EditorConfig::default()
+            .with_environment_values(None, Some("https://code.example.com/"));
+
+        assert!(matches!(config.editor_type, EditorType::CodeServer));
+        assert_eq!(
+            config.custom_command.as_deref(),
+            Some("https://code.example.com/")
+        );
+    }
+
+    #[test]
+    fn environment_editor_type_overrides_existing_editor() {
+        let config = EditorConfig::default()
+            .with_environment_values(Some("CODE_SERVER"), Some("https://code.example.com/"));
+
+        assert!(matches!(config.editor_type, EditorType::CodeServer));
+        assert_eq!(
+            config.custom_command.as_deref(),
+            Some("https://code.example.com/")
+        );
+    }
+}

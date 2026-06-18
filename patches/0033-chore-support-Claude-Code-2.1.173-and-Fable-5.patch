@@ -1,0 +1,78 @@
+From 6e1062903d8a937c574330f2650a0a89a39dd189 Mon Sep 17 00:00:00 2001
+From: Riajul Islam <kmriajulislami@gmail.com>
+Date: Thu, 11 Jun 2026 16:34:30 +0600
+Subject: [PATCH] chore: support Claude Code 2.1.173 and Fable 5
+
+---
+ crates/executors/src/executors/claude.rs | 32 ++++++++++++++++++++++--
+ 1 file changed, 30 insertions(+), 2 deletions(-)
+
+diff --git a/crates/executors/src/executors/claude.rs b/crates/executors/src/executors/claude.rs
+index e3b1aad2c..41fd371c4 100644
+--- a/crates/executors/src/executors/claude.rs
++++ b/crates/executors/src/executors/claude.rs
+@@ -64,7 +64,7 @@ fn base_command(claude_code_router: bool, cladup: bool) -> &'static str {
+     } else if claude_code_router {
+         "npx -y @musistudio/claude-code-router@2.0.0 code"
+     } else {
+-        "npx -y @anthropic-ai/claude-code@2.1.142"
++        "npx -y @anthropic-ai/claude-code@2.1.173"
+     }
+ }
+ 
+@@ -291,12 +291,14 @@ fn default_discovered_options() -> crate::executor_discovery::ExecutorDiscovered
+     let effort_options =
+         ReasoningOption::from_names(["low", "medium", "high", "xhigh", "max"].map(String::from));
+ 
+-    let supports_effort = |id: &str| -> bool { id.contains("opus") || id.contains("sonnet") };
++    let supports_effort =
++        |id: &str| -> bool { id.contains("fable") || id.contains("opus") || id.contains("sonnet") };
+ 
+     ExecutorDiscoveredOptions {
+         model_selector: ModelSelectorConfig {
+             providers: vec![],
+             models: [
++                ("fable", "Fable 5"),
+                 ("opus", "Opus"),
+                 ("opus[1m]", "Opus (1M context)"),
+                 ("sonnet", "Sonnet"),
+@@ -3029,10 +3031,36 @@ mod tests {
+         let builder = executor.build_command_builder().await.unwrap();
+         let params = builder.params.as_ref().expect("Claude command params");
+ 
++        assert_eq!(builder.base, "npx -y @anthropic-ai/claude-code@2.1.173");
+         assert!(params.contains(&"--permission-prompt-tool=stdio".to_string()));
+         assert!(params.contains(&"--input-format=stream-json".to_string()));
+     }
+ 
++    #[test]
++    fn test_default_options_include_fable_model_with_effort() {
++        let options = default_discovered_options();
++        let fable = options
++            .model_selector
++            .models
++            .iter()
++            .find(|model| model.id == "fable")
++            .expect("fable model");
++
++        assert_eq!(fable.name, "Fable 5");
++        assert_eq!(
++            fable
++                .reasoning_options
++                .iter()
++                .map(|option| option.id.as_str())
++                .collect::<Vec<_>>(),
++            vec!["low", "medium", "high", "xhigh", "max"]
++        );
++        assert_eq!(
++            options.model_selector.default_model.as_deref(),
++            Some("opus")
++        );
++    }
++
+     #[tokio::test]
+     async fn test_streaming_patch_generation() {
+         use std::sync::Arc;
+-- 
+2.50.1 (Apple Git-155)
+

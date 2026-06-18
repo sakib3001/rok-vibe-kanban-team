@@ -1,0 +1,247 @@
+From fc755e5e66de7d88955690084011bdc64e3b962e Mon Sep 17 00:00:00 2001
+From: Riajul Islam <riajul@kahf.co>
+Date: Tue, 14 Apr 2026 06:27:05 +0000
+Subject: [PATCH] downstream:
+ 0017-fix-add-30s-WebSocket-ping-keepalive-to-all-long-liv
+
+---
+ crates/server/src/routes/approvals.rs         | 10 +++++++
+ .../server/src/routes/execution_processes.rs  | 27 +++++++++++++++++++
+ crates/server/src/routes/scratch.rs           | 10 +++++++
+ crates/server/src/routes/terminal.rs          | 10 ++++++-
+ .../server/src/routes/workspaces/streams.rs   | 18 +++++++++++++
+ 5 files changed, 74 insertions(+), 1 deletion(-)
+
+diff --git a/crates/server/src/routes/approvals.rs b/crates/server/src/routes/approvals.rs
+index 83e143598..5b3e0511e 100644
+--- a/crates/server/src/routes/approvals.rs
++++ b/crates/server/src/routes/approvals.rs
+@@ -1,3 +1,5 @@
++use std::time::Duration;
++
+ use axum::{
+     Router,
+     extract::{State, ws::Message},
+@@ -74,6 +76,9 @@ async fn handle_approvals_ws(
+     }
+     socket.send(LogMsg::Ready.to_ws_message_unchecked()).await?;
+ 
++    let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
++    ping_interval.tick().await; // skip first immediate tick
++
+     loop {
+         tokio::select! {
+             patch = stream.next() => {
+@@ -100,6 +105,11 @@ async fn handle_approvals_ws(
+                     }
+                 }
+             }
++            _ = ping_interval.tick() => {
++                if socket.send(Message::Ping(vec![].into())).await.is_err() {
++                    break;
++                }
++            }
+         }
+     }
+ 
+diff --git a/crates/server/src/routes/execution_processes.rs b/crates/server/src/routes/execution_processes.rs
+index 425d06942..45c746a01 100644
+--- a/crates/server/src/routes/execution_processes.rs
++++ b/crates/server/src/routes/execution_processes.rs
+@@ -1,3 +1,5 @@
++use std::time::Duration;
++
+ use anyhow;
+ use axum::{
+     Extension, Router,
+@@ -103,6 +105,9 @@ async fn handle_raw_logs_ws(
+         }
+     });
+ 
++    let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
++    ping_interval.tick().await; // skip first immediate tick
++
+     loop {
+         tokio::select! {
+             item = stream.next() => {
+@@ -127,6 +132,11 @@ async fn handle_raw_logs_ws(
+                     Err(_) => break,
+                 }
+             }
++            _ = ping_interval.tick() => {
++                if socket.send(Message::Ping(vec![].into())).await.is_err() {
++                    break;
++                }
++            }
+         }
+     }
+     // Send a proper close frame so the client sees code 1000 (normal closure)
+@@ -170,6 +180,10 @@ async fn handle_normalized_logs_ws(
+     stream: impl futures_util::Stream<Item = anyhow::Result<LogMsg>> + Unpin + Send + 'static,
+ ) -> anyhow::Result<()> {
+     let mut stream = stream.map_ok(|msg| msg.to_ws_message_unchecked());
++
++    let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
++    ping_interval.tick().await; // skip first immediate tick
++
+     loop {
+         tokio::select! {
+             item = stream.next() => {
+@@ -194,6 +208,11 @@ async fn handle_normalized_logs_ws(
+                     Err(_) => break,
+                 }
+             }
++            _ = ping_interval.tick() => {
++                if socket.send(Message::Ping(vec![].into())).await.is_err() {
++                    break;
++                }
++            }
+         }
+     }
+     let _ = socket.close().await;
+@@ -244,6 +263,9 @@ async fn handle_execution_processes_by_session_ws(
+         .await?
+         .map_ok(|msg| msg.to_ws_message_unchecked());
+ 
++    let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
++    ping_interval.tick().await; // skip first immediate tick
++
+     loop {
+         tokio::select! {
+             item = stream.next() => {
+@@ -268,6 +290,11 @@ async fn handle_execution_processes_by_session_ws(
+                     Err(_) => break,
+                 }
+             }
++            _ = ping_interval.tick() => {
++                if socket.send(Message::Ping(vec![].into())).await.is_err() {
++                    break;
++                }
++            }
+         }
+     }
+     Ok(())
+diff --git a/crates/server/src/routes/scratch.rs b/crates/server/src/routes/scratch.rs
+index 8e9ceaa07..d832fe9b8 100644
+--- a/crates/server/src/routes/scratch.rs
++++ b/crates/server/src/routes/scratch.rs
+@@ -1,3 +1,5 @@
++use std::time::Duration;
++
+ use axum::{
+     Json, Router,
+     extract::{Path, State, ws::Message},
+@@ -125,6 +127,9 @@ async fn handle_scratch_ws(
+         .await?
+         .map_ok(|msg| msg.to_ws_message_unchecked());
+ 
++    let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
++    ping_interval.tick().await; // skip first immediate tick
++
+     loop {
+         tokio::select! {
+             item = stream.next() => {
+@@ -149,6 +154,11 @@ async fn handle_scratch_ws(
+                     Err(_) => break,
+                 }
+             }
++            _ = ping_interval.tick() => {
++                if socket.send(Message::Ping(vec![].into())).await.is_err() {
++                    break;
++                }
++            }
+         }
+     }
+     Ok(())
+diff --git a/crates/server/src/routes/terminal.rs b/crates/server/src/routes/terminal.rs
+index 596de4d96..3a778fcdb 100644
+--- a/crates/server/src/routes/terminal.rs
++++ b/crates/server/src/routes/terminal.rs
+@@ -1,4 +1,4 @@
+-use std::path::PathBuf;
++use std::{path::PathBuf, time::Duration};
+ 
+ use axum::{
+     Router,
+@@ -125,6 +125,9 @@ async fn handle_terminal_ws(
+     let pty_service = deployment.pty().clone();
+     let session_id_for_input = session_id;
+ 
++    let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
++    ping_interval.tick().await; // skip first immediate tick
++
+     loop {
+         tokio::select! {
+             maybe_output = output_rx.recv() => {
+@@ -169,6 +172,11 @@ async fn handle_terminal_ws(
+                     }
+                 }
+             }
++            _ = ping_interval.tick() => {
++                if socket.send(Message::Ping(vec![].into())).await.is_err() {
++                    break;
++                }
++            }
+         }
+     }
+ 
+diff --git a/crates/server/src/routes/workspaces/streams.rs b/crates/server/src/routes/workspaces/streams.rs
+index 17e0d5878..f08e39596 100644
+--- a/crates/server/src/routes/workspaces/streams.rs
++++ b/crates/server/src/routes/workspaces/streams.rs
+@@ -7,6 +7,8 @@ use deployment::Deployment;
+ use serde::Deserialize;
+ use services::services::container::ContainerService;
+ 
++use std::time::Duration;
++
+ use crate::{
+     DeploymentImpl,
+     middleware::signed_ws::{MaybeSignedWebSocket, SignedWsUpgrade},
+@@ -68,6 +70,9 @@ async fn handle_workspace_diff_ws(
+ 
+     let mut stream = stream.map_ok(|msg: LogMsg| msg.to_ws_message_unchecked());
+ 
++    let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
++    ping_interval.tick().await; // skip first immediate tick
++
+     loop {
+         tokio::select! {
+             item = stream.next() => {
+@@ -92,6 +97,11 @@ async fn handle_workspace_diff_ws(
+                     Err(_) => break,
+                 }
+             }
++            _ = ping_interval.tick() => {
++                if socket.send(Message::Ping(vec![].into())).await.is_err() {
++                    break;
++                }
++            }
+         }
+     }
+     Ok(())
+@@ -111,6 +121,9 @@ async fn handle_workspaces_ws(
+         .await?
+         .map_ok(|msg| msg.to_ws_message_unchecked());
+ 
++    let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
++    ping_interval.tick().await; // skip first immediate tick
++
+     loop {
+         tokio::select! {
+             item = stream.next() => {
+@@ -135,6 +148,11 @@ async fn handle_workspaces_ws(
+                     Err(_) => break,
+                 }
+             }
++            _ = ping_interval.tick() => {
++                if socket.send(Message::Ping(vec![].into())).await.is_err() {
++                    break;
++                }
++            }
+         }
+     }
+     Ok(())
+-- 
+2.50.1
+

@@ -1,0 +1,990 @@
+From 000d00cd80f14e542b79b7e37016f01aeb325c43 Mon Sep 17 00:00:00 2001
+From: Riajul Islam <riajul@kahf.co>
+Date: Tue, 14 Apr 2026 06:27:05 +0000
+Subject: [PATCH] downstream:
+ 0010-feat-support-VSCODE_PROXY_URI-in-preview-iframe
+
+---
+ crates/preview-proxy/src/devtools_script.js   |   1 +
+ crates/preview-proxy/src/lib.rs               | 238 ++++++++++-
+ .../workspaces/PreviewBrowserContainer.tsx    | 376 ++++++++++++++----
+ .../src/shared/hooks/usePreviewUrl.ts         |  58 ++-
+ 4 files changed, 582 insertions(+), 91 deletions(-)
+
+diff --git a/crates/preview-proxy/src/devtools_script.js b/crates/preview-proxy/src/devtools_script.js
+index ca1c3d3af..4314377f4 100644
+--- a/crates/preview-proxy/src/devtools_script.js
++++ b/crates/preview-proxy/src/devtools_script.js
+@@ -44,6 +44,7 @@
+     try {
+       var u = new URL(url);
+       u.searchParams.delete('_refresh');
++      u.searchParams.delete('__vk_port');
+       return u.toString();
+     } catch (e) {
+       return url;
+diff --git a/crates/preview-proxy/src/lib.rs b/crates/preview-proxy/src/lib.rs
+index 7200cdd34..ccc730780 100644
+--- a/crates/preview-proxy/src/lib.rs
++++ b/crates/preview-proxy/src/lib.rs
+@@ -6,6 +6,12 @@
+ //! The proxy listens on a separate port and routes requests based on the
+ //! Host header subdomain. A request to `{port}.localhost:{proxy_port}/path`
+ //! is forwarded to `localhost:{port}/path`.
++//!
++//! When accessed via VSCODE_PROXY_URI (cloud/code-server deployments), subdomain
++//! routing is unavailable. In that mode the target port is passed via a
++//! `__vk_port` query parameter on the initial request. The proxy persists it in
++//! a `vk_preview_target` cookie so subsequent sub-resource requests (CSS, JS,
++//! images, fetch) are routed to the correct dev server.
+ 
+ use std::net::SocketAddr;
+ 
+@@ -363,6 +369,149 @@ fn rewrite_redirect_like_headers(
+     }
+ }
+ 
++/// Cookie name used to persist the target dev-server port when routing via
++/// VSCODE_PROXY_URI (`__vk_port` query-param flow).
++const VK_PREVIEW_TARGET_COOKIE: &str = "vk_preview_target";
++
++/// Extract the target dev-server port from either the `__vk_port` query
++/// parameter or the `vk_preview_target` cookie. Returns `None` when neither
++/// is present.
++fn extract_target_from_query_or_cookie(request: &Request) -> Option<PreviewTarget> {
++    // 1. Prefer the explicit query-param (set on the initial iframe load).
++    if let Some(query) = request.uri().query() {
++        for pair in query.split('&') {
++            if let Some(value) = pair.strip_prefix("__vk_port=") {
++                if let Ok(port) = value.parse::<u16>() {
++                    return Some(PreviewTarget {
++                        port,
++                        relay_host_id: None,
++                    });
++                }
++            }
++        }
++    }
++
++    // 2. Fall back to the cookie (set by a previous response for sub-resources).
++    let cookies = request.headers().get_all(header::COOKIE);
++    for cookie_header in cookies {
++        let Ok(value) = cookie_header.to_str() else {
++            continue;
++        };
++        for cookie in value.split(';') {
++            let cookie = cookie.trim();
++            if let Some(port_str) = cookie.strip_prefix("vk_preview_target=") {
++                if let Ok(port) = port_str.trim().parse::<u16>() {
++                    return Some(PreviewTarget {
++                        port,
++                        relay_host_id: None,
++                    });
++                }
++            }
++        }
++    }
++
++    None
++}
++
++/// Strip the `__vk_port` parameter from a query string so the upstream
++/// dev-server never sees it.
++fn strip_vk_port_from_query(query: &str) -> String {
++    query
++        .split('&')
++        .filter(|pair| !pair.starts_with("__vk_port="))
++        .collect::<Vec<_>>()
++        .join("&")
++}
++
++/// Rewrite an absolute localhost redirect to a relative path.
++/// Used in VSCODE_PROXY_URI mode where the browser should stay on the proxy origin.
++fn rewrite_redirect_to_relative(
++    value: &str,
++    target_port: u16,
++) -> Option<String> {
++    let original_value = value.trim();
++    if original_value.is_empty() {
++        return None;
++    }
++
++    let normalized_value = normalize_redirect_like_url_token(original_value)?;
++
++    // Already relative — leave as-is.
++    if (normalized_value.starts_with('/') && !normalized_value.starts_with("//"))
++        || normalized_value.starts_with('?')
++        || normalized_value.starts_with('#')
++    {
++        if normalized_value == original_value {
++            return None;
++        }
++        return Some(normalized_value);
++    }
++
++    let parsed = if normalized_value.starts_with("//") {
++        reqwest::Url::parse(&format!("http:{normalized_value}")).ok()?
++    } else {
++        reqwest::Url::parse(&normalized_value).ok()?
++    };
++    let host = parsed.host_str()?.to_ascii_lowercase();
++    if !is_loopback_redirect_host(&host) {
++        if normalized_value == original_value {
++            return None;
++        }
++        return Some(normalized_value);
++    }
++
++    let parsed_port = parsed.port_or_known_default()?;
++    if parsed_port != target_port {
++        if normalized_value == original_value {
++            return None;
++        }
++        return Some(normalized_value);
++    }
++
++    // Convert to relative: keep path + query + fragment only.
++    let mut relative = parsed.path().to_string();
++    if let Some(query) = parsed.query() {
++        relative.push('?');
++        relative.push_str(query);
++    }
++    if let Some(fragment) = parsed.fragment() {
++        relative.push('#');
++        relative.push_str(fragment);
++    }
++    Some(relative)
++}
++
++/// Like [`rewrite_redirect_like_headers`] but converts absolute localhost
++/// redirects to relative paths instead of subdomain URLs. Used in
++/// VSCODE_PROXY_URI mode where the browser must stay on the single proxy origin.
++fn rewrite_redirect_like_headers_relative(
++    headers: &mut [(HeaderName, HeaderValue)],
++    target_port: u16,
++) {
++    for (name, value) in headers.iter_mut() {
++        let name_lower = name.as_str().to_ascii_lowercase();
++        if !is_redirect_like_header_name(&name_lower) {
++            continue;
++        }
++
++        let Ok(value_str) = value.to_str() else {
++            continue;
++        };
++
++        let rewritten = if name_lower == "refresh" {
++            None
++        } else {
++            rewrite_redirect_to_relative(value_str, target_port)
++        };
++
++        if let Some(rewritten) = rewritten
++            && let Ok(rewritten_header) = HeaderValue::from_str(&rewritten)
++        {
++            *value = rewritten_header;
++        }
++    }
++}
++
+ fn extract_target_from_host(headers: &HeaderMap) -> Option<PreviewTarget> {
+     let host = headers.get(header::HOST)?.to_str().ok()?;
+     let subdomain = host.split('.').next()?;
+@@ -387,16 +536,45 @@ pub async fn proxy_subdomain_request(
+     proxy_port: u16,
+     request: Request,
+ ) -> Response {
+-    let target = match extract_target_from_host(request.headers()) {
+-        Some(port) => port,
+-        None => {
+-            return (StatusCode::BAD_REQUEST, "No valid port in Host subdomain").into_response();
+-        }
+-    };
++    // Try subdomain routing first (local mode: {port}.localhost:{proxyPort}).
++    // If the subdomain yields the proxy's own port (happens when code-server
++    // forwards with Host: {proxyPort}.code.vk.community.example.com), treat it as
++    // "no usable subdomain" and fall through to cookie/query routing.
++    let (target, use_relative_redirects) =
++        match extract_target_from_host(request.headers()) {
++            Some(t) if t.port != proxy_port => (t, false),
++            _ => match extract_target_from_query_or_cookie(&request) {
++                Some(t) => (t, true),
++                None => {
++                    return (
++                        StatusCode::BAD_REQUEST,
++                        "No valid port in Host subdomain or cookie",
++                    )
++                        .into_response();
++                }
++            },
++        };
++
++    if target.port == proxy_port {
++        return (
++            StatusCode::BAD_REQUEST,
++            "Target port matches proxy port",
++        )
++            .into_response();
++    }
+ 
+     let path = normalized_proxy_path(request.uri().path()).to_string();
+ 
+-    proxy_impl(service, backend_addr, proxy_port, target, path, request).await
++    proxy_impl(
++        service,
++        backend_addr,
++        proxy_port,
++        target,
++        path,
++        use_relative_redirects,
++        request,
++    )
++    .await
+ }
+ 
+ async fn proxy_impl(
+@@ -405,6 +583,7 @@ async fn proxy_impl(
+     proxy_port: u16,
+     target: PreviewTarget,
+     path_str: String,
++    use_relative_redirects: bool,
+     request: Request,
+ ) -> Response {
+     let (mut parts, body) = request.into_parts();
+@@ -412,7 +591,14 @@ async fn proxy_impl(
+     // Extract query string and subprotocols before WebSocket upgrade.
+     // Both are required: Vite 6+ needs ?token= for auth, and checks
+     // Sec-WebSocket-Protocol: vite-hmr before accepting the upgrade.
+-    let query_string = parts.uri.query().map(|q| q.to_string());
++    let raw_query = parts.uri.query().unwrap_or_default();
++    let query_string = if use_relative_redirects {
++        let cleaned = strip_vk_port_from_query(raw_query);
++        if cleaned.is_empty() { None } else { Some(cleaned) }
++    } else {
++        let q = raw_query.to_string();
++        if q.is_empty() { None } else { Some(q) }
++    };
+     let ws_protocols: Option<String> = extract_ws_protocols(&parts.headers);
+ 
+     if let Ok(ws) = WebSocketUpgrade::from_request_parts(&mut parts, &()).await {
+@@ -449,7 +635,7 @@ async fn proxy_impl(
+     }
+ 
+     let request = Request::from_parts(parts, body);
+-    http_proxy_handler(service, backend_addr, proxy_port, target, path_str, request).await
++    http_proxy_handler(service, backend_addr, proxy_port, target, path_str, use_relative_redirects, request).await
+ }
+ 
+ async fn http_proxy_handler(
+@@ -458,6 +644,7 @@ async fn http_proxy_handler(
+     proxy_port: u16,
+     target: PreviewTarget,
+     path_str: String,
++    use_relative_redirects: bool,
+     request: Request,
+ ) -> Response {
+     let (parts, body) = request.into_parts();
+@@ -465,7 +652,12 @@ async fn http_proxy_handler(
+     let headers = parts.headers;
+     let original_uri = parts.uri;
+ 
+-    let query_string = original_uri.query().unwrap_or_default();
++    let query_string_owned = if use_relative_redirects {
++        strip_vk_port_from_query(original_uri.query().unwrap_or_default())
++    } else {
++        original_uri.query().unwrap_or_default().to_string()
++    };
++    let query_string = query_string_owned.as_str();
+     let normalized_path = normalized_proxy_path(&path_str);
+ 
+     let is_rsc_request = headers.contains_key(header::HeaderName::from_static("rsc"));
+@@ -544,12 +736,26 @@ async fn http_proxy_handler(
+     let is_html = content_type.contains("text/html");
+ 
+     let mut response_headers = collect_response_headers(response.headers(), is_html);
+-    rewrite_redirect_like_headers(
+-        &mut response_headers,
+-        target.port,
+-        Some(proxy_port),
+-        target.relay_host_id,
+-    );
++
++    if use_relative_redirects {
++        rewrite_redirect_like_headers_relative(&mut response_headers, target.port);
++    } else {
++        rewrite_redirect_like_headers(
++            &mut response_headers,
++            target.port,
++            Some(proxy_port),
++            target.relay_host_id,
++        );
++    }
++
++    if use_relative_redirects {
++        if let Ok(cookie_value) = HeaderValue::from_str(&format!(
++            "{}={}; Path=/; HttpOnly; SameSite=Lax",
++            VK_PREVIEW_TARGET_COOKIE, target.port
++        )) {
++            response_headers.push((header::SET_COOKIE, cookie_value));
++        }
++    }
+ 
+     let status = StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::OK);
+ 
+diff --git a/packages/web-core/src/pages/workspaces/PreviewBrowserContainer.tsx b/packages/web-core/src/pages/workspaces/PreviewBrowserContainer.tsx
+index 9bc3273f5..13cbdd7b6 100644
+--- a/packages/web-core/src/pages/workspaces/PreviewBrowserContainer.tsx
++++ b/packages/web-core/src/pages/workspaces/PreviewBrowserContainer.tsx
+@@ -94,60 +94,178 @@ function normalizePreviewUrl(rawUrl: string, baseUrl?: string): string | null {
+   return parsePreviewUrl(rawUrl, baseUrl)?.toString() ?? null;
+ }
+ 
+-function stripPreviewRefreshParam(rawUrl: string): string | null {
++function stripPreviewInternalParams(rawUrl: string): string | null {
+   try {
+     const url = new URL(rawUrl);
+     url.searchParams.delete('_refresh');
++    url.searchParams.delete('__vk_port');
+     return url.toString();
+   } catch {
+     return null;
+   }
+ }
+ 
++/**
++ * Extract the port number from a URL that matches a VSCODE_PROXY_URI template.
++ * E.g. template `https://{{port}}.code.vk.community.example.com/`, url
++ * `https://3000.code.vk.community.example.com/path` → `"3000"`.
++ */
++function extractPortFromVsCodeProxyUrl(
++  proxyUrl: string,
++  proxyTemplate: string | null
++): string | null {
++  if (!proxyTemplate || !proxyTemplate.includes('{{port}}')) {
++    return null;
++  }
++
++  const [prefix, suffix] = proxyTemplate.split('{{port}}');
++  if (prefix == null || suffix == null) {
++    return null;
++  }
++
++  const escapedPrefix = prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
++  const escapedSuffix = suffix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
++  const match = proxyUrl.match(
++    new RegExp(`^${escapedPrefix}(\\d+)${escapedSuffix}`, 'i')
++  );
++
++  return match?.[1] ?? null;
++}
++
++/**
++ * Build a localhost dev URL from the components of a proxy URL.
++ */
++function buildLocalhostDevUrl(
++  pathname: string,
++  searchParams: URLSearchParams,
++  hash: string,
++  devPort: string
++): string {
++  const devUrl = new URL(`http://localhost${pathname}`);
++
++  // Strip internal params before building dev URL.
++  searchParams.delete('_refresh');
++  searchParams.delete('__vk_port');
++  const search = searchParams.toString();
++  if (search) {
++    devUrl.search = search;
++  }
++
++  if (hash) {
++    devUrl.hash = hash;
++  }
++
++  if (devPort !== '80') {
++    devUrl.port = devPort;
++  }
++
++  return devUrl.toString();
++}
++
+ /**
+  * Transform a proxy URL back to the dev server URL.
+- * Proxy format: http://{devPort}.localhost:{proxyPort}{path}?_refresh=...
+- * Dev format:   http://localhost:{devPort}{path}
++ *
++ * Handles two proxy formats:
++ * 1. Subdomain:  http://{devPort}.localhost:{proxyPort}{path}
++ * 2. VSCODE_PROXY_URI via proxy: https://{proxyPort}.host/{path}?__vk_port={devPort}
+  */
+ function transformProxyUrlToDevUrl(
+   proxyUrl: string,
+-  devPort: string
++  devPort: string,
++  vsCodeProxyUri: string | null,
++  previewProxyPort: number | null
+ ): string | null {
+   try {
+     const url = new URL(proxyUrl);
+ 
++    // 1. Subdomain proxy: {devPort}.localhost:{proxyPort}
+     const hostnameParts = url.hostname.split('.');
+-    if (
+-      hostnameParts.length < 2 ||
+-      !hostnameParts.slice(1).join('.').startsWith('localhost')
+-    ) {
+-      return null;
++    const hasLocalhostSuffix =
++      hostnameParts.length >= 2 &&
++      hostnameParts.slice(1).join('.').startsWith('localhost');
++
++    if (hasLocalhostSuffix) {
++      return buildLocalhostDevUrl(
++        url.pathname,
++        url.searchParams,
++        url.hash,
++        devPort
++      );
+     }
+ 
+-    url.searchParams.delete('_refresh');
+-
+-    const devUrl = new URL(`http://localhost${url.pathname}`);
++    // 2. VSCODE_PROXY_URI proxy-chained: URL matches the proxy port template
++    if (vsCodeProxyUri && previewProxyPort) {
++      const extractedPort = extractPortFromVsCodeProxyUrl(
++        proxyUrl,
++        vsCodeProxyUri
++      );
++      if (extractedPort === String(previewProxyPort)) {
++        const vkPort = url.searchParams.get('__vk_port');
++        const effectiveDevPort = vkPort ?? devPort;
++        return buildLocalhostDevUrl(
++          url.pathname,
++          url.searchParams,
++          url.hash,
++          effectiveDevPort
++        );
++      }
+ 
+-    const search = url.searchParams.toString();
+-    if (search) {
+-      devUrl.search = search;
++      // 3. VSCODE_PROXY_URI direct: URL matches a dev-port template
++      if (extractedPort && extractedPort === devPort) {
++        return buildLocalhostDevUrl(
++          url.pathname,
++          url.searchParams,
++          url.hash,
++          devPort
++        );
++      }
+     }
++  } catch {
++    // Keep going.
++  }
+ 
+-    if (url.hash) {
+-      devUrl.hash = url.hash;
+-    }
++  return null;
++}
+ 
+-    if (devPort !== '80') {
+-      devUrl.port = devPort;
+-    }
++/**
++ * In VSCODE_PROXY_URI mode the iframe is loaded via the proxy port.
++ * For display we want the dev-port direct URL.
++ */
++function proxyPortUrlToDirectUrl(
++  proxyUrl: string,
++  vsCodeProxyUri: string,
++  previewProxyPort: number,
++  devServerPort: string
++): string | null {
++  const extractedPort = extractPortFromVsCodeProxyUrl(proxyUrl, vsCodeProxyUri);
++  if (extractedPort !== String(previewProxyPort)) {
++    return null;
++  }
+ 
+-    return devUrl.toString();
++  try {
++    const url = new URL(proxyUrl);
++    url.searchParams.delete('_refresh');
++    url.searchParams.delete('__vk_port');
++    const directBase = vsCodeProxyUri.replace('{{port}}', devServerPort);
++    const directUrl = new URL(
++      url.pathname + (url.search || '') + (url.hash || ''),
++      directBase
++    );
++    directUrl.search = url.search;
++    directUrl.searchParams.delete('_refresh');
++    directUrl.searchParams.delete('__vk_port');
++    directUrl.hash = url.hash;
++    return directUrl.toString();
+   } catch {
+     return null;
+   }
+ }
+ 
+-function getTargetDevPort(url: URL, previewProxyPort?: number): string {
++function getTargetDevPort(
++  url: URL,
++  previewProxyPort?: number,
++  vsCodeProxyUri?: string | null
++): string {
+   const hostnameParts = url.hostname.split('.');
+   const hasLocalhostSuffix =
+     hostnameParts.length >= 2 &&
+@@ -163,9 +281,89 @@ function getTargetDevPort(url: URL, previewProxyPort?: number): string {
+     }
+   }
+ 
++  if (vsCodeProxyUri && previewProxyPort) {
++    const extractedPort = extractPortFromVsCodeProxyUrl(
++      url.toString(),
++      vsCodeProxyUri
++    );
++    if (extractedPort === String(previewProxyPort)) {
++      const vkPort = url.searchParams.get('__vk_port');
++      if (vkPort && /^\d+$/.test(vkPort)) {
++        return vkPort;
++      }
++    } else if (extractedPort) {
++      return extractedPort;
++    }
++  }
++
+   return url.port || (url.protocol === 'https:' ? '443' : '80');
+ }
+ 
++/**
++ * Build the proxy URL loaded by the iframe.
++ */
++function buildPreviewProxyUrl({
++  devServerPort,
++  effectiveParsedUrl,
++  hostId,
++  previewProxyPort,
++  previewRefreshKey,
++  vsCodeProxyUri,
++}: {
++  devServerPort: string;
++  effectiveParsedUrl: URL;
++  hostId: string | null;
++  previewProxyPort: number | null;
++  previewRefreshKey?: number;
++  vsCodeProxyUri: string | null;
++}): string | undefined {
++  const path =
++    effectiveParsedUrl.pathname +
++    effectiveParsedUrl.search +
++    effectiveParsedUrl.hash;
++
++  // Priority 1: Route through Rust proxy via VSCODE_PROXY_URI.
++  if (vsCodeProxyUri?.includes('{{port}}') && previewProxyPort) {
++    const proxyBase = vsCodeProxyUri.replace(
++      '{{port}}',
++      String(previewProxyPort)
++    );
++    const proxyUrl = new URL(path || '/', proxyBase);
++    proxyUrl.searchParams.set('__vk_port', devServerPort);
++    if (previewRefreshKey != null) {
++      proxyUrl.searchParams.set('_refresh', String(previewRefreshKey));
++    }
++    return proxyUrl.toString();
++  }
++
++  // Priority 2: Direct bypass via VSCODE_PROXY_URI (no proxy features).
++  if (vsCodeProxyUri?.includes('{{port}}')) {
++    const proxyBase = vsCodeProxyUri.replace('{{port}}', devServerPort);
++    const proxyUrl = new URL(path || '/', proxyBase);
++    if (previewRefreshKey != null) {
++      proxyUrl.searchParams.set('_refresh', String(previewRefreshKey));
++    }
++    return proxyUrl.toString();
++  }
++
++  // Priority 3: Local subdomain routing.
++  if (!previewProxyPort) {
++    return undefined;
++  }
++
++  const hostToken =
++    hostId != null ? `${devServerPort}--${hostId}` : devServerPort;
++  const proxyUrl = new URL(
++    `http://${hostToken}.localhost:${previewProxyPort}${path}`
++  );
++
++  if (previewRefreshKey != null) {
++    proxyUrl.searchParams.set('_refresh', String(previewRefreshKey));
++  }
++
++  return proxyUrl.toString();
++}
++
+ interface PreviewBrowserContainerProps {
+   workspaceId: string;
+   className: string;
+@@ -186,7 +384,7 @@ export function PreviewBrowserContainer({
+     (s) => s.triggerPreviewRefresh
+   );
+   const { repos, workspaceId: activeWorkspaceId } = useWorkspaceContext();
+-  const { previewProxyPort } = useUserSystem();
++  const { previewProxyPort, vsCodeProxyUri } = useUserSystem();
+   const hostId = useHostId();
+ 
+   const {
+@@ -209,7 +407,11 @@ export function PreviewBrowserContainer({
+     );
+   }, [runningDevServers]);
+   const { logs } = useLogStream(primaryDevServer?.id ?? '');
+-  const urlInfo = usePreviewUrl(logs, previewProxyPort ?? undefined);
++  const urlInfo = usePreviewUrl(
++    logs,
++    previewProxyPort ?? undefined,
++    vsCodeProxyUri
++  );
+ 
+   // Detect failed dev server process (failed status or completed with non-zero exit code)
+   const failedDevServerProcess = devServerProcesses.find(
+@@ -269,6 +471,7 @@ export function PreviewBrowserContainer({
+     return LOOPBACK_HOSTS.has(effectiveParsedUrl.hostname);
+   }, [effectiveParsedUrl]);
+ 
++  // Builds the proxy URL loaded by the iframe.
+   const iframeUrl = useMemo(() => {
+     if (!effectiveParsedUrl || !devServerPort) {
+       return undefined;
+@@ -286,8 +489,18 @@ export function PreviewBrowserContainer({
+     // Loopback URLs need the preview proxy for origin isolation
+     if (!previewProxyPort) return undefined;
+ 
+-    // Don't proxy to Vibe Kanban's own ports (would create infinite loop)
+-    const vibeKanbanPort = window.location.port || '80';
++    // Detect the port Vibe Kanban itself is served on.  In VSCODE_PROXY_URI
++    // mode window.location.port is empty (HTTPS default) — extract from the
++    // hostname subdomain or the VSCODE_PROXY_URI template instead.
++    const vibeKanbanPort =
++      window.location.port ||
++      (vsCodeProxyUri
++        ? extractPortFromVsCodeProxyUrl(
++            window.location.href,
++            vsCodeProxyUri
++          )
++        : null) ||
++      '80';
+     if (devServerPort === vibeKanbanPort) {
+       console.warn(
+         `[Preview] Ignoring dev server URL with same port as Vibe Kanban (${devServerPort}). ` +
+@@ -296,25 +509,33 @@ export function PreviewBrowserContainer({
+       return undefined;
+     }
+ 
+-    // Also check if it's the preview proxy port itself
+-    if (devServerPort === String(previewProxyPort)) {
++    if (
++      previewProxyPort != null &&
++      devServerPort === String(previewProxyPort)
++    ) {
+       console.warn(
+         `[Preview] Ignoring dev server URL with same port as preview proxy (${devServerPort}).`
+       );
+       return undefined;
+     }
+ 
+-    const path = effectiveParsedUrl.pathname + effectiveParsedUrl.search;
+-
+-    // Subdomain-based routing: the proxy extracts the port from the Host header
+-    const hostToken =
+-      hostId != null ? `${devServerPort}--${hostId}` : devServerPort;
+-    const proxyUrl = new URL(
+-      `http://${hostToken}.localhost:${previewProxyPort}${path}`
+-    );
+-    proxyUrl.searchParams.set('_refresh', String(previewRefreshKey));
++    if (
++      !vsCodeProxyUri &&
++      !['localhost', '127.0.0.1'].includes(window.location.hostname)
++    ) {
++      console.warn(
++        '[Preview] Preview proxy subdomain routing may not work on non-localhost hostname'
++      );
++    }
+ 
+-    return proxyUrl.toString();
++    return buildPreviewProxyUrl({
++      devServerPort,
++      effectiveParsedUrl,
++      hostId,
++      previewProxyPort,
++      previewRefreshKey,
++      vsCodeProxyUri,
++    });
+   }, [
+     devServerPort,
+     effectiveParsedUrl,
+@@ -322,6 +543,7 @@ export function PreviewBrowserContainer({
+     isLoopbackPreview,
+     previewProxyPort,
+     previewRefreshKey,
++    vsCodeProxyUri,
+   ]);
+ 
+   const urlInputRef = useRef<HTMLInputElement>(null);
+@@ -366,18 +588,35 @@ export function PreviewBrowserContainer({
+   } = usePreviewNavigation();
+   const bridgeRef = useRef<PreviewDevToolsBridge | null>(null);
+   const displayedPreviewUrl = useMemo(() => {
++    const toDisplayUrl = (rawUrl: string): string => {
++      const cleaned = stripPreviewInternalParams(rawUrl) ?? rawUrl;
++      if (vsCodeProxyUri && previewProxyPort && devServerPort) {
++        return (
++          proxyPortUrlToDirectUrl(
++            cleaned,
++            vsCodeProxyUri,
++            previewProxyPort,
++            devServerPort
++          ) ?? cleaned
++        );
++      }
++      return cleaned;
++    };
++
+     if (navigation?.url) {
+       // Non-loopback (direct) URLs: strip _refresh param and show as-is
+       if (!isLoopbackPreview) {
+-        return stripPreviewRefreshParam(navigation.url) ?? navigation.url;
++        return stripPreviewInternalParams(navigation.url) ?? navigation.url;
+       }
+-      if (hostId != null) {
+-        return stripPreviewRefreshParam(navigation.url) ?? navigation.url;
++      if (hostId != null || vsCodeProxyUri != null) {
++        return toDisplayUrl(navigation.url);
+       }
+       if (devServerPort) {
+         const transformed = transformProxyUrlToDevUrl(
+           navigation.url,
+-          devServerPort
++          devServerPort,
++          vsCodeProxyUri,
++          previewProxyPort
+         );
+         if (transformed) {
+           return transformed;
+@@ -385,8 +624,8 @@ export function PreviewBrowserContainer({
+       }
+     }
+ 
+-    if (hostId != null && iframeUrl) {
+-      return stripPreviewRefreshParam(iframeUrl) ?? iframeUrl;
++    if ((hostId != null || vsCodeProxyUri != null) && iframeUrl) {
++      return toDisplayUrl(iframeUrl);
+     }
+ 
+     return effectiveUrl ?? null;
+@@ -397,6 +636,8 @@ export function PreviewBrowserContainer({
+     iframeUrl,
+     isLoopbackPreview,
+     navigation?.url,
++    previewProxyPort,
++    vsCodeProxyUri,
+   ]);
+ 
+   const handleBridgeMessage = useCallback(
+@@ -711,11 +952,16 @@ export function PreviewBrowserContainer({
+     const normalizedInput = normalizedInputUrl.toString();
+     const normalizedInputDevPort = getTargetDevPort(
+       normalizedInputUrl,
+-      previewProxyPort ?? undefined
++      previewProxyPort ?? undefined,
++      vsCodeProxyUri
+     );
+     const normalizedInputDevUrl =
+-      transformProxyUrlToDevUrl(normalizedInput, normalizedInputDevPort) ??
+-      normalizedInput;
++      transformProxyUrlToDevUrl(
++        normalizedInput,
++        normalizedInputDevPort,
++        vsCodeProxyUri,
++        previewProxyPort
++      ) ?? normalizedInput;
+     const normalizedInputDevParsed = parsePreviewUrl(normalizedInputDevUrl);
+     if (!normalizedInputDevParsed) {
+       return;
+@@ -740,25 +986,20 @@ export function PreviewBrowserContainer({
+     // Bridge SPA navigation only works when the proxy injects devtools_script.js
+     // into the iframe. Non-loopback URLs bypass the proxy entirely, so the bridge
+     // isn't available — fall through to setOverrideUrl for a full iframe reload.
+-    if (
+-      showIframe &&
+-      iframeRef.current?.contentWindow &&
+-      isLoopbackPreview &&
+-      previewProxyPort &&
+-      devServerPort != null &&
+-      normalizedInputDevPort === devServerPort
+-    ) {
+-      const proxyPath =
+-        normalizedInputDevParsed.pathname +
+-        normalizedInputDevParsed.search +
+-        normalizedInputDevParsed.hash;
+-      const hostToken =
+-        hostId != null
+-          ? `${normalizedInputDevPort}--${hostId}`
+-          : normalizedInputDevPort;
+-      const proxyUrl = `http://${hostToken}.localhost:${previewProxyPort}${proxyPath}`;
+-      bridgeRef.current?.navigateTo(proxyUrl);
+-      return;
++    if (showIframe && iframeRef.current?.contentWindow && isLoopbackPreview) {
++      if (devServerPort != null && normalizedInputDevPort === devServerPort) {
++        const proxyUrl = buildPreviewProxyUrl({
++          devServerPort: normalizedInputDevPort,
++          effectiveParsedUrl: normalizedInputDevParsed,
++          hostId,
++          previewProxyPort,
++          vsCodeProxyUri,
++        });
++        if (proxyUrl) {
++          bridgeRef.current?.navigateTo(proxyUrl);
++          return;
++        }
++      }
+     }
+ 
+     setOverrideUrl(normalizedInputDevUrl);
+@@ -772,6 +1013,7 @@ export function PreviewBrowserContainer({
+     hasOverride,
+     showIframe,
+     previewProxyPort,
++    vsCodeProxyUri,
+     clearOverride,
+     resetNavigation,
+     setOverrideUrl,
+diff --git a/packages/web-core/src/shared/hooks/usePreviewUrl.ts b/packages/web-core/src/shared/hooks/usePreviewUrl.ts
+index e0b9f91e8..09dac0adf 100644
+--- a/packages/web-core/src/shared/hooks/usePreviewUrl.ts
++++ b/packages/web-core/src/shared/hooks/usePreviewUrl.ts
+@@ -82,9 +82,21 @@ const isBetterPreviewUrlCandidate = (
+ };
+ 
+ const getVibeKanbanPort = (): string | null => {
+-  if (typeof window !== 'undefined' && window.location.port) {
++  if (typeof window === 'undefined') return null;
++
++  // Standard case: port is explicit in the URL (e.g. localhost:13500).
++  if (window.location.port) {
+     return window.location.port;
+   }
++
++  // VSCODE_PROXY_URI case: the app is accessed via a subdomain whose leading
++  // label is the port number (e.g. https://13500.code.vk.community.example.com/).
++  // window.location.port is empty (HTTPS default), so extract from hostname.
++  const leadingLabel = window.location.hostname.split('.')[0];
++  if (leadingLabel && /^\d{2,5}$/.test(leadingLabel)) {
++    return leadingLabel;
++  }
++
+   return null;
+ };
+ 
+@@ -148,7 +160,10 @@ const toOriginUrlInfo = (
+   };
+ };
+ 
+-export const detectPreviewUrl = (line: string): PreviewUrlInfo | null => {
++export const detectPreviewUrl = (
++  line: string,
++  vsCodeProxyUri?: string | null
++): PreviewUrlInfo | null => {
+   const cleaned = stripAnsi(line);
+   // Some dev servers split terminal output into chunks, which can break
+   // ports as `:40\n00`. Collapse whitespace inside the port before matching.
+@@ -216,12 +231,38 @@ export const detectPreviewUrl = (line: string): PreviewUrlInfo | null => {
+     };
+   }
+ 
++  // VSCODE_PROXY_URI detection: match URLs like https://3000.code.vk.community.example.com/
++  // that the dev server may print instead of localhost URLs.
++  if (vsCodeProxyUri?.includes('{{port}}')) {
++    const [tplPrefix, tplSuffix] = vsCodeProxyUri.split('{{port}}');
++    if (tplPrefix != null && tplSuffix != null) {
++      const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
++      const proxyRe = new RegExp(
++        `${esc(tplPrefix)}(\\d{2,5})${esc(tplSuffix)}`,
++        'i'
++      );
++      const proxyMatch = proxyRe.exec(normalized);
++      if (proxyMatch) {
++        const port = Number(proxyMatch[1]);
++        if (vibeKanbanPort && String(port) === vibeKanbanPort) {
++          return null;
++        }
++        return {
++          url: `http://localhost:${port}/`,
++          port,
++          scheme: 'http',
++        };
++      }
++    }
++  }
++
+   return null;
+ };
+ 
+ function detectPreviewUrlFromBuffer(
+   buffer: string,
+-  blockedPort?: number
++  blockedPort?: number,
++  vsCodeProxyUri?: string | null
+ ): PreviewUrlInfo | null {
+   const lines = buffer.split(/\r?\n/);
+   let best: PreviewUrlInfo | null = null;
+@@ -231,7 +272,7 @@ function detectPreviewUrlFromBuffer(
+     const line = lines[i];
+     if (!line) continue;
+ 
+-    const detected = detectPreviewUrl(line);
++    const detected = detectPreviewUrl(line, vsCodeProxyUri);
+     if (!detected || (blockedPort && detected.port === blockedPort)) {
+       continue;
+     }
+@@ -243,7 +284,7 @@ function detectPreviewUrlFromBuffer(
+   if (best) return best;
+ 
+   // Fallback for URLs split across chunk boundaries where line-by-line matching fails.
+-  const fallback = detectPreviewUrl(buffer);
++  const fallback = detectPreviewUrl(buffer, vsCodeProxyUri);
+   if (fallback && blockedPort && fallback.port === blockedPort) {
+     return null;
+   }
+@@ -252,7 +293,8 @@ function detectPreviewUrlFromBuffer(
+ 
+ export function usePreviewUrl(
+   logs: Array<{ content: string }> | undefined,
+-  previewProxyPort?: number
++  previewProxyPort?: number,
++  vsCodeProxyUri?: string | null
+ ): PreviewUrlInfo | undefined {
+   const [urlInfo, setUrlInfo] = useState<PreviewUrlInfo | undefined>();
+   const lastIndexRef = useRef(0);
+@@ -292,7 +334,7 @@ export function usePreviewUrl(
+           ? merged.slice(-LOG_SCAN_BUFFER_LIMIT)
+           : merged;
+       detectedUrl =
+-        detectPreviewUrlFromBuffer(logBufferRef.current, previewProxyPort) ??
++        detectPreviewUrlFromBuffer(logBufferRef.current, previewProxyPort, vsCodeProxyUri) ??
+         undefined;
+     }
+ 
+@@ -306,7 +348,7 @@ export function usePreviewUrl(
+     }
+ 
+     lastIndexRef.current = logs.length;
+-  }, [logs, urlInfo, previewProxyPort]);
++  }, [logs, urlInfo, previewProxyPort, vsCodeProxyUri]);
+ 
+   return urlInfo;
+ }
+-- 
+2.50.1
+

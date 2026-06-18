@@ -1,0 +1,391 @@
+From 2c0de163332bc3c955daeeb6ddeb8a2f1d7db567 Mon Sep 17 00:00:00 2001
+From: Riajul Islam <riajul@kahf.co>
+Date: Mon, 20 Apr 2026 15:11:53 +0000
+Subject: [PATCH] feat: add browser notification support
+
+---
+ packages/local-web/src/app/entry/App.tsx       |  3 +
+ packages/remote-web/src/routes/__root.tsx     |  2 +
+ .../pages/workspaces/NotificationsPage.tsx    | 90 ++++++++++++++++---
+ .../hooks/useBrowserNotificationPreference.ts | 48 ++++++++++
+ .../src/shared/lib/browserNotifications.ts    | 52 +++++++++++
+ .../notifications/AppBrowserNotifications.tsx | 81 +++++++++++++++++
+ 6 files changed, 265 insertions(+), 11 deletions(-)
+ create mode 100644 packages/web-core/src/shared/hooks/useBrowserNotificationPreference.ts
+ create mode 100644 packages/web-core/src/shared/lib/browserNotifications.ts
+ create mode 100644 packages/web-core/src/shared/notifications/AppBrowserNotifications.tsx
+
+diff --git a/packages/local-web/src/app/entry/App.tsx b/packages/local-web/src/app/entry/App.tsx
+index adcfbc901..3df3894b1 100644
+--- a/packages/local-web/src/app/entry/App.tsx
++++ b/packages/local-web/src/app/entry/App.tsx
+@@ -10,6 +10,8 @@ import { useTauriNotificationNavigation } from '@web/app/hooks/useTauriNotificat
+ import { useTauriUpdateReady } from '@web/app/hooks/useTauriUpdateReady';
+ import { AppSystemNotifications } from '@web/app/notifications/AppSystemNotifications';
+ import { router } from '@web/app/router';
++import { AppBrowserNotifications } from '@/shared/notifications/AppBrowserNotifications';
++import { isTauriApp } from '@/shared/lib/platform';
+ 
+ function TauriListeners() {
+   useTauriNotificationNavigation();
+@@ -25,6 +27,7 @@ function App() {
+         <UserSystemProvider>
+           <LocalAuthProvider>
+             <AppSystemNotifications />
++            {!isTauriApp() && <AppBrowserNotifications />}
+             <ClickedElementsProvider>
+               <HotkeysProvider
+                 initiallyActiveScopes={[
+diff --git a/packages/remote-web/src/routes/__root.tsx b/packages/remote-web/src/routes/__root.tsx
+index 84a16b1ce..6c4a9b9a0 100644
+--- a/packages/remote-web/src/routes/__root.tsx
++++ b/packages/remote-web/src/routes/__root.tsx
+@@ -11,6 +11,7 @@ import { RemoteActionsProvider } from "@remote/app/providers/RemoteActionsProvid
+ import { RemoteUserSystemProvider } from "@remote/app/providers/RemoteUserSystemProvider";
+ import { RemoteAppShell } from "@remote/app/layout/RemoteAppShell";
+ import { UserProvider } from "@/shared/providers/remote/UserProvider";
++import { AppBrowserNotifications } from "@/shared/notifications/AppBrowserNotifications";
+ import { WorkspaceProvider } from "@/shared/providers/WorkspaceProvider";
+ import { ExecutionProcessesProvider } from "@/shared/providers/ExecutionProcessesProvider";
+ import { TerminalProvider } from "@/shared/providers/TerminalProvider";
+@@ -162,6 +163,7 @@ function RootLayout() {
+   return (
+     <AppNavigationProvider value={appNavigation}>
+       <UserProvider>
++        <AppBrowserNotifications />
+         <RemoteActionsProvider>
+           <RemoteUserSystemProvider>{content}</RemoteUserSystemProvider>
+         </RemoteActionsProvider>
+diff --git a/packages/web-core/src/pages/workspaces/NotificationsPage.tsx b/packages/web-core/src/pages/workspaces/NotificationsPage.tsx
+index 6542bf7d8..c5cd03c2a 100644
+--- a/packages/web-core/src/pages/workspaces/NotificationsPage.tsx
++++ b/packages/web-core/src/pages/workspaces/NotificationsPage.tsx
+@@ -1,7 +1,9 @@
+-import { useCallback } from 'react';
++import { useCallback, useEffect, useState } from 'react';
+ import { useRouter } from '@tanstack/react-router';
+ import { BellIcon, CheckIcon, ChecksIcon } from '@phosphor-icons/react';
+ import { UserAvatar } from '@vibe/ui/components/UserAvatar';
++import { useAuth } from '@/shared/hooks/auth/useAuth';
++import { useBrowserNotificationPreference } from '@/shared/hooks/useBrowserNotificationPreference';
+ import { useNotifications } from '@/shared/hooks/useNotifications';
+ import { useNotificationMembers } from '@/shared/hooks/useNotificationMembers';
+ import type { GroupedNotification } from '@/shared/lib/notifications';
+@@ -9,6 +11,11 @@ import {
+   getGroupedNotificationSegments,
+   type MessageSegment,
+ } from '@/shared/lib/notificationMessage';
++import {
++  getBrowserNotificationPermission,
++  requestBrowserNotificationPermission,
++  type BrowserNotificationPermission,
++} from '@/shared/lib/browserNotifications';
+ import { formatRelativeTime } from '@/shared/lib/date';
+ import { cn } from '@/shared/lib/utils';
+ 
+@@ -58,9 +65,22 @@ function NotificationMessage({
+ 
+ export function NotificationsPage() {
+   const router = useRouter();
++  const { userId } = useAuth();
+   const { data, updateMany, enabled, unseenCount, groupedNotifications } =
+     useNotifications();
+   const { membersByUserId } = useNotificationMembers(data);
++  const {
++    enabled: browserNotificationsEnabled,
++    setEnabled: setBrowserNotificationsEnabled,
++  } = useBrowserNotificationPreference(userId);
++  const [browserPermission, setBrowserPermission] =
++    useState<BrowserNotificationPermission>(() =>
++      getBrowserNotificationPermission()
++    );
++
++  useEffect(() => {
++    setBrowserPermission(getBrowserNotificationPermission());
++  }, []);
+ 
+   const markGroupSeen = useCallback(
+     (group: GroupedNotification) => {
+@@ -95,6 +115,29 @@ export function NotificationsPage() {
+     updateMany(unseen.map((n) => ({ id: n.id, changes: { seen: true } })));
+   }, [data, updateMany]);
+ 
++  const handleBrowserNotificationsClick = useCallback(async () => {
++    if (browserNotificationsEnabled) {
++      setBrowserNotificationsEnabled(false);
++      return;
++    }
++
++    const permission =
++      browserPermission === 'granted'
++        ? browserPermission
++        : await requestBrowserNotificationPermission();
++
++    setBrowserPermission(permission);
++    setBrowserNotificationsEnabled(permission === 'granted');
++  }, [
++    browserNotificationsEnabled,
++    browserPermission,
++    setBrowserNotificationsEnabled,
++  ]);
++
++  const browserNotificationLabel = browserNotificationsEnabled
++    ? 'Disable browser notifications'
++    : 'Enable browser notifications';
++
+   if (!enabled) {
+     return (
+       <div className="flex items-center justify-center h-full text-low">
+@@ -107,16 +150,41 @@ export function NotificationsPage() {
+     <div className="flex flex-col h-full overflow-hidden">
+       <div className="flex items-center justify-between px-double py-base border-b border-border">
+         <h1 className="text-xl font-medium text-high">Notifications</h1>
+-        {unseenCount > 0 && (
+-          <button
+-            type="button"
+-            onClick={handleMarkAllSeen}
+-            className="flex items-center gap-1 px-base py-half text-sm text-low hover:text-normal transition-colors cursor-pointer"
+-          >
+-            <ChecksIcon size={16} />
+-            Mark all as read
+-          </button>
+-        )}
++        <div className="flex items-center gap-half">
++          {browserPermission !== 'unsupported' && (
++            <button
++              type="button"
++              onClick={handleBrowserNotificationsClick}
++              disabled={browserPermission === 'denied'}
++              className={cn(
++                'flex items-center gap-1 px-base py-half text-sm text-low hover:text-normal transition-colors cursor-pointer',
++                'disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:text-low'
++              )}
++              title={
++                browserPermission === 'denied'
++                  ? 'Browser notifications are blocked in this browser'
++                  : browserNotificationLabel
++              }
++            >
++              <BellIcon size={16} />
++              <span className="hidden sm:inline">
++                {browserPermission === 'denied'
++                  ? 'Notifications blocked'
++                  : browserNotificationLabel}
++              </span>
++            </button>
++          )}
++          {unseenCount > 0 && (
++            <button
++              type="button"
++              onClick={handleMarkAllSeen}
++              className="flex items-center gap-1 px-base py-half text-sm text-low hover:text-normal transition-colors cursor-pointer"
++            >
++              <ChecksIcon size={16} />
++              <span className="hidden sm:inline">Mark all as read</span>
++            </button>
++          )}
++        </div>
+       </div>
+ 
+       <div className="flex-1 overflow-y-auto">
+diff --git a/packages/web-core/src/shared/hooks/useBrowserNotificationPreference.ts b/packages/web-core/src/shared/hooks/useBrowserNotificationPreference.ts
+new file mode 100644
+index 000000000..a34252059
+--- /dev/null
++++ b/packages/web-core/src/shared/hooks/useBrowserNotificationPreference.ts
+@@ -0,0 +1,48 @@
++import { useCallback, useEffect, useMemo, useState } from 'react';
++
++const STORAGE_KEY_PREFIX = 'vibe-kanban.browser-notifications.enabled';
++
++function getStorageKey(userId: string | null | undefined): string | null {
++  return userId ? `${STORAGE_KEY_PREFIX}.${userId}` : null;
++}
++
++function readPreference(storageKey: string | null): boolean {
++  if (!storageKey || typeof window === 'undefined') {
++    return false;
++  }
++
++  return window.localStorage.getItem(storageKey) === 'true';
++}
++
++export function useBrowserNotificationPreference(
++  userId: string | null | undefined
++) {
++  const storageKey = useMemo(() => getStorageKey(userId), [userId]);
++  const [enabled, setEnabledState] = useState(() => readPreference(storageKey));
++
++  useEffect(() => {
++    setEnabledState(readPreference(storageKey));
++  }, [storageKey]);
++
++  const setEnabled = useCallback(
++    (nextEnabled: boolean) => {
++      setEnabledState(nextEnabled);
++
++      if (!storageKey || typeof window === 'undefined') {
++        return;
++      }
++
++      if (nextEnabled) {
++        window.localStorage.setItem(storageKey, 'true');
++      } else {
++        window.localStorage.removeItem(storageKey);
++      }
++    },
++    [storageKey]
++  );
++
++  return {
++    enabled,
++    setEnabled,
++  };
++}
+diff --git a/packages/web-core/src/shared/lib/browserNotifications.ts b/packages/web-core/src/shared/lib/browserNotifications.ts
+new file mode 100644
+index 000000000..5394b0546
+--- /dev/null
++++ b/packages/web-core/src/shared/lib/browserNotifications.ts
+@@ -0,0 +1,52 @@
++export type BrowserNotificationPermission =
++  | NotificationPermission
++  | 'unsupported';
++
++export interface BrowserNotificationPayload {
++  id: string;
++  title: string;
++  body: string;
++  deeplinkPath?: string;
++}
++
++export function getBrowserNotificationPermission(): BrowserNotificationPermission {
++  if (typeof window === 'undefined' || !('Notification' in window)) {
++    return 'unsupported';
++  }
++
++  return window.Notification.permission;
++}
++
++export async function requestBrowserNotificationPermission(): Promise<BrowserNotificationPermission> {
++  if (typeof window === 'undefined' || !('Notification' in window)) {
++    return 'unsupported';
++  }
++
++  return window.Notification.requestPermission();
++}
++
++export function showBrowserNotification({
++  id,
++  title,
++  body,
++  deeplinkPath,
++}: BrowserNotificationPayload): void {
++  if (getBrowserNotificationPermission() !== 'granted') {
++    return;
++  }
++
++  const notification = new window.Notification(title, {
++    body,
++    icon: '/favicon.png',
++    tag: id,
++  });
++
++  notification.onclick = () => {
++    window.focus();
++    notification.close();
++
++    if (deeplinkPath) {
++      window.location.assign(deeplinkPath);
++    }
++  };
++}
+diff --git a/packages/web-core/src/shared/notifications/AppBrowserNotifications.tsx b/packages/web-core/src/shared/notifications/AppBrowserNotifications.tsx
+new file mode 100644
+index 000000000..d8b2a8895
+--- /dev/null
++++ b/packages/web-core/src/shared/notifications/AppBrowserNotifications.tsx
+@@ -0,0 +1,81 @@
++import { useEffect, useRef } from 'react';
++import { useAuth } from '@/shared/hooks/auth/useAuth';
++import { useBrowserNotificationPreference } from '@/shared/hooks/useBrowserNotificationPreference';
++import { useNotificationMembers } from '@/shared/hooks/useNotificationMembers';
++import { useNotifications } from '@/shared/hooks/useNotifications';
++import { getGroupedNotificationText } from '@/shared/lib/notificationMessage';
++import {
++  getBrowserNotificationPermission,
++  showBrowserNotification,
++} from '@/shared/lib/browserNotifications';
++
++export function AppBrowserNotifications() {
++  const { userId } = useAuth();
++  const { enabled: browserNotificationsEnabled } =
++    useBrowserNotificationPreference(userId);
++  const { data, enabled, groupedNotifications } = useNotifications();
++  const { membersByUserId, isLoading, isFetching } =
++    useNotificationMembers(data);
++  const displayedNotificationIdsRef = useRef(new Set<string>());
++  const initializedRef = useRef(false);
++
++  useEffect(() => {
++    displayedNotificationIdsRef.current.clear();
++    initializedRef.current = false;
++  }, [userId]);
++
++  useEffect(() => {
++    if (!enabled || isLoading || isFetching) {
++      return;
++    }
++
++    if (!initializedRef.current) {
++      for (const group of groupedNotifications) {
++        if (!group.seen) {
++          displayedNotificationIdsRef.current.add(group.id);
++        }
++      }
++      initializedRef.current = true;
++      return;
++    }
++
++    const activeGroupIds = new Set(
++      groupedNotifications.map((group) => group.id)
++    );
++    for (const id of displayedNotificationIdsRef.current) {
++      if (!activeGroupIds.has(id)) {
++        displayedNotificationIdsRef.current.delete(id);
++      }
++    }
++
++    if (
++      !browserNotificationsEnabled ||
++      getBrowserNotificationPermission() !== 'granted'
++    ) {
++      return;
++    }
++
++    for (const group of groupedNotifications) {
++      if (group.seen || displayedNotificationIdsRef.current.has(group.id)) {
++        continue;
++      }
++
++      displayedNotificationIdsRef.current.add(group.id);
++      showBrowserNotification({
++        id: group.id,
++        title: 'Vibe Kanban',
++        body: getGroupedNotificationText(group, membersByUserId),
++        deeplinkPath: group.deeplinkPath ?? undefined,
++      });
++    }
++  }, [
++    browserNotificationsEnabled,
++    enabled,
++    groupedNotifications,
++    isFetching,
++    isLoading,
++    membersByUserId,
++  ]);
++
++  return null;
++}
+-- 
+2.50.1

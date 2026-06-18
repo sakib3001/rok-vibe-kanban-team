@@ -1,0 +1,29 @@
+From c835cf35b5c7b32280497b28dd4b43b464dd7857 Mon Sep 17 00:00:00 2001
+From: Riajul Islam <riajul@kahf.co>
+Date: Tue, 14 Apr 2026 06:27:05 +0000
+Subject: [PATCH] downstream: 0013-update-loops-template-ids
+
+---
+ crates/remote/src/mail.rs | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/crates/remote/src/mail.rs b/crates/remote/src/mail.rs
+index 34b10f4e7..18c1428d7 100644
+--- a/crates/remote/src/mail.rs
++++ b/crates/remote/src/mail.rs
+@@ -6,9 +6,9 @@ use serde_json::json;
+ 
+ use crate::digest::DigestError;
+ 
+-const DEFAULT_INVITE_TEMPLATE_ID: &str = "cmhvy2wgs3s13z70i1pxakij9";
+-const DEFAULT_REVIEW_READY_TEMPLATE_ID: &str = "cmj47k5ge16990iylued9by17";
+-const DEFAULT_REVIEW_FAILED_TEMPLATE_ID: &str = "cmj49ougk1c8s0iznavijdqpo";
++const DEFAULT_INVITE_TEMPLATE_ID: &str = "cmlb3zqwe03960i159htyb93d";
++const DEFAULT_REVIEW_READY_TEMPLATE_ID: &str = "cmlb45ki603ia0i1pdiq2ekyr";
++const DEFAULT_REVIEW_FAILED_TEMPLATE_ID: &str = "cmlb44vqe03p90i04bwkfqjv3";
+ 
+ fn env_or(var: &str, default: &str) -> String {
+     std::env::var(var)
+-- 
+2.50.1
+

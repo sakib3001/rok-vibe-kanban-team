@@ -1,0 +1,208 @@
+From 1fe8a80c2f10dbc0bcd5c6db23fd69ea8681f965 Mon Sep 17 00:00:00 2001
+From: Riajul Islam <kmriajulislami@gmail.com>
+Date: Mon, 8 Jun 2026 17:51:50 +0600
+Subject: [PATCH] feat: add Cladup support to Claude executor
+
+---
+ crates/executors/src/executors/claude.rs      | 83 +++++++++++++------
+ .../src/executors/claude/slash_commands.rs    | 10 ++-
+ shared/schemas/claude_code.json               |  8 ++
+ shared/types.ts                               |  2 +-
+ 4 files changed, 75 insertions(+), 28 deletions(-)
+
+diff --git a/crates/executors/src/executors/claude.rs b/crates/executors/src/executors/claude.rs
+index 873037781..238e9560c 100644
+--- a/crates/executors/src/executors/claude.rs
++++ b/crates/executors/src/executors/claude.rs
+@@ -58,8 +58,10 @@ use crate::{
+ 
+ const SUPPRESSED_STDERR_PATTERNS: &[&str] = &["[WARN] Fast mode requires the native binary"];
+ 
+-fn base_command(claude_code_router: bool) -> &'static str {
+-    if claude_code_router {
++fn base_command(claude_code_router: bool, cladup: bool) -> &'static str {
++    if cladup {
++        "npx -y github:iamriajul/cladup"
++    } else if claude_code_router {
+         "npx -y @musistudio/claude-code-router@2.0.0 code"
+     } else {
+         "npx -y @anthropic-ai/claude-code@2.1.142"
+@@ -122,6 +124,12 @@ pub struct ClaudeCode {
+     pub append_prompt: AppendPrompt,
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub claude_code_router: Option<bool>,
++    #[schemars(
++        title = "Use Cladup",
++        description = "Run Claude through the Cladup shim instead of invoking Claude Code print mode directly"
++    )]
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub cladup: Option<bool>,
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub plan: Option<bool>,
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+@@ -147,16 +155,19 @@ pub struct ClaudeCode {
+ 
+ impl ClaudeCode {
+     async fn build_command_builder(&self) -> Result<CommandBuilder, CommandBuildError> {
+-        // If base_command_override is provided and claude_code_router is also set, log a warning
+-        if self.cmd.base_command_override.is_some() && self.claude_code_router.is_some() {
++        let claude_code_router = self.claude_code_router.unwrap_or(false);
++        let cladup = self.cladup.unwrap_or(false);
++
++        if self.cmd.base_command_override.is_some() && (claude_code_router || cladup) {
+             tracing::warn!(
+-                "base_command_override is set, this will override the claude_code_router setting"
++                "base_command_override is set, this will override claude_code_router and cladup settings"
+             );
++        } else if claude_code_router && cladup {
++            tracing::warn!("cladup and claude_code_router are both enabled; using cladup");
+         }
+ 
+         let mut builder =
+-            CommandBuilder::new(base_command(self.claude_code_router.unwrap_or(false)))
+-                .params(["-p"]);
++            CommandBuilder::new(base_command(claude_code_router, cladup)).params(["-p"]);
+ 
+         let plan = self.plan.unwrap_or(false);
+         let approvals = self.approvals.unwrap_or(false);
+@@ -411,6 +422,13 @@ impl StandardCodingAgentExecutor for ClaudeCode {
+             executor_discovery::ExecutorConfigCacheKey, executors::utils::executor_options_cache,
+         };
+ 
++        if self.cladup.unwrap_or(false) {
++            let options = default_discovered_options();
++            return Ok(Box::pin(futures::stream::once(async move {
++                patch::executor_discovered_options(options)
++            })));
++        }
++
+         let cache = executor_options_cache();
+         let cmd_key = self.compute_cmd_key();
+         let base_executor = BaseCodingAgent::ClaudeCode;
+@@ -2778,6 +2796,27 @@ mod tests {
+         normalize_helper(&mut processor, json, worktree)
+     }
+ 
++    fn test_executor() -> ClaudeCode {
++        ClaudeCode {
++            claude_code_router: Some(false),
++            cladup: None,
++            plan: None,
++            approvals: None,
++            model: None,
++            effort: None,
++            agent: None,
++            append_prompt: AppendPrompt::default(),
++            dangerously_skip_permissions: None,
++            cmd: crate::command::CmdOverrides {
++                base_command_override: None,
++                additional_params: None,
++                env: None,
++            },
++            approvals_service: None,
++            disable_api_key: None,
++        }
++    }
++
+     #[test]
+     fn test_claude_json_parsing() {
+         let system_json =
+@@ -2932,29 +2971,25 @@ mod tests {
+         assert_eq!(absolute_result, "src/main.rs");
+     }
+ 
++    #[tokio::test]
++    async fn test_cladup_builds_claude_shim_command() {
++        let mut executor = test_executor();
++        executor.cladup = Some(true);
++
++        let builder = executor.build_command_builder().await.unwrap();
++
++        assert_eq!(builder.base, "npx -y github:iamriajul/cladup");
++        let params = builder.params.as_ref().expect("Claude command params");
++        assert_eq!(params.first().map(String::as_str), Some("-p"));
++    }
++
+     #[tokio::test]
+     async fn test_streaming_patch_generation() {
+         use std::sync::Arc;
+ 
+         use workspace_utils::msg_store::MsgStore;
+ 
+-        let executor = ClaudeCode {
+-            claude_code_router: Some(false),
+-            plan: None,
+-            approvals: None,
+-            model: None,
+-            effort: None,
+-            agent: None,
+-            append_prompt: AppendPrompt::default(),
+-            dangerously_skip_permissions: None,
+-            cmd: crate::command::CmdOverrides {
+-                base_command_override: None,
+-                additional_params: None,
+-                env: None,
+-            },
+-            approvals_service: None,
+-            disable_api_key: None,
+-        };
++        let executor = test_executor();
+         let msg_store = Arc::new(MsgStore::new());
+         let current_dir = std::path::PathBuf::from("/tmp/test-worktree");
+ 
+diff --git a/crates/executors/src/executors/claude/slash_commands.rs b/crates/executors/src/executors/claude/slash_commands.rs
+index bdba4e3e5..c7a889bc0 100644
+--- a/crates/executors/src/executors/claude/slash_commands.rs
++++ b/crates/executors/src/executors/claude/slash_commands.rs
+@@ -194,9 +194,13 @@ impl ClaudeCode {
+     async fn build_slash_commands_discovery_command_builder(
+         &self,
+     ) -> Result<CommandBuilder, CommandBuildError> {
+-        let mut builder =
+-            CommandBuilder::new(base_command(self.claude_code_router.unwrap_or(false)))
+-                .params(["-p"]);
++        // Cladup's stream-json emulation omits Claude system init records, while discovery
++        // depends on those records. Runtime turns still honor the Cladup setting.
++        let mut builder = CommandBuilder::new(base_command(
++            self.claude_code_router.unwrap_or(false),
++            false,
++        ))
++        .params(["-p"]);
+ 
+         builder = builder.extend_params([
+             "--verbose",
+diff --git a/shared/schemas/claude_code.json b/shared/schemas/claude_code.json
+index 94d023656..9f700241b 100644
+--- a/shared/schemas/claude_code.json
++++ b/shared/schemas/claude_code.json
+@@ -17,6 +17,14 @@
+         "null"
+       ]
+     },
++    "cladup": {
++      "title": "Use Cladup",
++      "description": "Run Claude through the Cladup shim instead of invoking Claude Code print mode directly",
++      "type": [
++        "boolean",
++        "null"
++      ]
++    },
+     "plan": {
+       "type": [
+         "boolean",
+diff --git a/shared/types.ts b/shared/types.ts
+index 01dccb4f3..2fba19a3b 100644
+--- a/shared/types.ts
++++ b/shared/types.ts
+@@ -623,7 +623,7 @@ export enum BaseAgentCapability { SESSION_FORK = "SESSION_FORK", SETUP_HELPER =
+ 
+ export type ClaudeEffort = "low" | "medium" | "high" | "xhigh" | "max";
+ 
+-export type ClaudeCode = { append_prompt: AppendPrompt, claude_code_router?: boolean | null, plan?: boolean | null, approvals?: boolean | null, model?: string | null, effort?: ClaudeEffort | null, agent?: string | null, dangerously_skip_permissions?: boolean | null, disable_api_key?: boolean | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
++export type ClaudeCode = { append_prompt: AppendPrompt, claude_code_router?: boolean | null, cladup?: boolean | null, plan?: boolean | null, approvals?: boolean | null, model?: string | null, effort?: ClaudeEffort | null, agent?: string | null, dangerously_skip_permissions?: boolean | null, disable_api_key?: boolean | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
+ 
+ export type Gemini = { append_prompt: AppendPrompt, model?: string | null, yolo?: boolean | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
+ 
+-- 
+2.50.1 (Apple Git-155)
+

@@ -1,0 +1,64 @@
+diff --git a/crates/services/src/services/auth.rs b/crates/services/src/services/auth.rs
+index ecda9cf80..a5cb5a1e9 100644
+--- a/crates/services/src/services/auth.rs
++++ b/crates/services/src/services/auth.rs
+@@ -10,6 +10,7 @@ use tokio::sync::{Mutex as TokioMutex, OwnedMutexGuard, RwLock};
+ use super::oauth_credentials::{Credentials, OAuthCredentials};
+ 
+ const DEFAULT_AUTH_SESSION_ID: &str = "__default__";
++const VIBE_KANBAN_BROWSER_SCOPED_AUTH_ENV: &str = "VIBE_KANBAN_BROWSER_SCOPED_AUTH";
+ 
+ tokio::task_local! {
+     static AUTH_SESSION_ID: String;
+@@ -26,6 +27,7 @@ struct SessionState {
+ #[derive(Clone)]
+ pub struct AuthContext {
+     base_credentials_path: Arc<PathBuf>,
++    browser_scoped_auth: bool,
+     session_states: Arc<RwLock<HashMap<String, SessionState>>>,
+ }
+ 
+@@ -33,6 +35,7 @@ impl AuthContext {
+     pub fn new(base_credentials_path: PathBuf) -> Self {
+         Self {
+             base_credentials_path: Arc::new(base_credentials_path),
++            browser_scoped_auth: parse_bool_env(VIBE_KANBAN_BROWSER_SCOPED_AUTH_ENV).unwrap_or(true),
+             session_states: Arc::new(RwLock::new(HashMap::new())),
+         }
+     }
+@@ -151,7 +154,11 @@ impl AuthContext {
+             .await
+     }
+ 
+-    fn normalize_session_id(session_id: Option<&str>) -> String {
++    fn normalize_session_id(&self, session_id: Option<&str>) -> String {
++        if !self.browser_scoped_auth {
++            return DEFAULT_AUTH_SESSION_ID.to_string();
++        }
++
+         session_id
+             .map(str::trim)
+             .filter(|value| !value.is_empty())
+@@ -175,7 +182,7 @@ impl AuthContext {
+     }
+ 
+     async fn session_state_for(&self, session_id: Option<&str>) -> SessionState {
+-        let session_id = Self::normalize_session_id(session_id);
++        let session_id = self.normalize_session_id(session_id);
+ 
+         if let Some(state) = self.session_states.read().await.get(&session_id).cloned() {
+             return state;
+@@ -203,3 +210,13 @@ impl AuthContext {
+         state
+     }
+ }
++
++fn parse_bool_env(name: &str) -> Option<bool> {
++    let value = std::env::var(name).ok()?;
++
++    match value.trim().to_lowercase().as_str() {
++        "1" | "true" | "yes" | "on" => Some(true),
++        "0" | "false" | "no" | "off" => Some(false),
++        _ => None,
++    }
++}

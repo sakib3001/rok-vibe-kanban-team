@@ -1,0 +1,124 @@
+From d9a84a66c285c19de46096555c51163b90416029 Mon Sep 17 00:00:00 2001
+From: Riajul Islam <kmriajulislami@gmail.com>
+Date: Mon, 8 Jun 2026 16:27:44 +0600
+Subject: [PATCH] chore: spell Antigravity branding
+
+---
+ crates/executors/src/executors/antigravity.rs    | 16 ++++++++--------
+ .../web-core/src/shared/components/AgentIcon.tsx |  2 +-
+ shared/schemas/anti_gravity.json                 |  6 +++---
+ 3 files changed, 12 insertions(+), 12 deletions(-)
+
+diff --git a/crates/executors/src/executors/antigravity.rs b/crates/executors/src/executors/antigravity.rs
+index 865898799..fee1aaab1 100644
+--- a/crates/executors/src/executors/antigravity.rs
++++ b/crates/executors/src/executors/antigravity.rs
+@@ -95,13 +95,13 @@ pub struct AntiGravity {
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     #[schemars(
+         title = "Dangerously Skip Permissions",
+-        description = "Pass `--dangerously-skip-permissions` to AntiGravity CLI."
++        description = "Pass `--dangerously-skip-permissions` to Antigravity CLI."
+     )]
+     pub dangerously_skip_permissions: Option<bool>,
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     #[schemars(
+         title = "Sandbox",
+-        description = "Pass `--sandbox` to AntiGravity CLI."
++        description = "Pass `--sandbox` to Antigravity CLI."
+     )]
+     pub sandbox: Option<bool>,
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+@@ -119,7 +119,7 @@ pub struct AntiGravity {
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     #[schemars(
+         title = "Context Window",
+-        description = "Context window used for Vibe Kanban's context usage gauge. AntiGravity CLI does not currently expose exact token usage, so usage is estimated."
++        description = "Context window used for Vibe Kanban's context usage gauge. Antigravity CLI does not currently expose exact token usage, so usage is estimated."
+     )]
+     pub context_window: Option<u32>,
+     #[serde(flatten)]
+@@ -519,7 +519,7 @@ async fn discover_antigravity_model_lines(cmd: &CmdOverrides, current_dir: &Path
+     {
+         Ok(parts) => parts,
+         Err(error) => {
+-            tracing::warn!("Failed to build AntiGravity model discovery command: {error}");
++            tracing::warn!("Failed to build Antigravity model discovery command: {error}");
+             return fallback_antigravity_model_lines();
+         }
+     };
+@@ -527,7 +527,7 @@ async fn discover_antigravity_model_lines(cmd: &CmdOverrides, current_dir: &Path
+     let (program_path, args) = match command_parts.into_resolved().await {
+         Ok(parts) => parts,
+         Err(error) => {
+-            tracing::warn!("Failed to resolve AntiGravity model discovery command: {error}");
++            tracing::warn!("Failed to resolve Antigravity model discovery command: {error}");
+             return fallback_antigravity_model_lines();
+         }
+     };
+@@ -566,18 +566,18 @@ async fn discover_antigravity_model_lines(cmd: &CmdOverrides, current_dir: &Path
+         }
+         Ok(Ok(output)) => {
+             tracing::warn!(
+-                "AntiGravity model discovery failed: {}",
++                "Antigravity model discovery failed: {}",
+                 String::from_utf8_lossy(&output.stderr).trim()
+             );
+             fallback_antigravity_model_lines()
+         }
+         Ok(Err(error)) => {
+-            tracing::warn!("AntiGravity model discovery failed: {error}");
++            tracing::warn!("Antigravity model discovery failed: {error}");
+             fallback_antigravity_model_lines()
+         }
+         Err(_) => {
+             tracing::warn!(
+-                "AntiGravity model discovery timed out after {ANTIGRAVITY_MODEL_DISCOVERY_TIMEOUT_SECS}s"
++                "Antigravity model discovery timed out after {ANTIGRAVITY_MODEL_DISCOVERY_TIMEOUT_SECS}s"
+             );
+             fallback_antigravity_model_lines()
+         }
+diff --git a/packages/web-core/src/shared/components/AgentIcon.tsx b/packages/web-core/src/shared/components/AgentIcon.tsx
+index 511909e41..787c41c9c 100644
+--- a/packages/web-core/src/shared/components/AgentIcon.tsx
++++ b/packages/web-core/src/shared/components/AgentIcon.tsx
+@@ -28,7 +28,7 @@ export function getAgentName(
+     case BaseCodingAgent.KIMI_CODE:
+       return 'Kimi';
+     case BaseCodingAgent.ANTI_GRAVITY:
+-      return 'AntiGravity';
++      return 'Antigravity';
+     case BaseCodingAgent.COPILOT:
+       return 'Copilot';
+     case BaseCodingAgent.DROID:
+diff --git a/shared/schemas/anti_gravity.json b/shared/schemas/anti_gravity.json
+index 76eb6970f..0932ba70b 100644
+--- a/shared/schemas/anti_gravity.json
++++ b/shared/schemas/anti_gravity.json
+@@ -29,7 +29,7 @@
+     },
+     "dangerously_skip_permissions": {
+       "title": "Dangerously Skip Permissions",
+-      "description": "Pass `--dangerously-skip-permissions` to AntiGravity CLI.",
++      "description": "Pass `--dangerously-skip-permissions` to Antigravity CLI.",
+       "type": [
+         "boolean",
+         "null"
+@@ -37,7 +37,7 @@
+     },
+     "sandbox": {
+       "title": "Sandbox",
+-      "description": "Pass `--sandbox` to AntiGravity CLI.",
++      "description": "Pass `--sandbox` to Antigravity CLI.",
+       "type": [
+         "boolean",
+         "null"
+@@ -64,7 +64,7 @@
+     },
+     "context_window": {
+       "title": "Context Window",
+-      "description": "Context window used for Vibe Kanban's context usage gauge. AntiGravity CLI does not currently expose exact token usage, so usage is estimated.",
++      "description": "Context window used for Vibe Kanban's context usage gauge. Antigravity CLI does not currently expose exact token usage, so usage is estimated.",
+       "type": [
+         "integer",
+         "null"

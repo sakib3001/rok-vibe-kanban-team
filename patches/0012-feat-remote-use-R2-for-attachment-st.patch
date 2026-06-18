@@ -1,0 +1,499 @@
+From 3b35ad17a4c4361a989beaed874915fd0cfab848 Mon Sep 17 00:00:00 2001
+From: Riajul Islam <riajul@kahf.co>
+Date: Tue, 14 Apr 2026 06:27:05 +0000
+Subject: [PATCH] downstream: 0012-feat-remote-use-R2-for-attachment-storage
+
+---
+ crates/remote/src/app.rs                 |   8 +-
+ crates/remote/src/attachments/cleanup.rs |  28 ++---
+ crates/remote/src/r2.rs                  | 132 +++++++++++++++++++++++
+ crates/remote/src/routes/attachments.rs  |  94 ++++++++--------
+ 4 files changed, 198 insertions(+), 64 deletions(-)
+
+diff --git a/crates/remote/src/app.rs b/crates/remote/src/app.rs
+index 500008497..5c31e57e2 100644
+--- a/crates/remote/src/app.rs
++++ b/crates/remote/src/app.rs
+@@ -128,7 +128,7 @@ impl Server {
+             tracing::info!("R2 storage service initialized");
+         } else {
+             tracing::warn!(
+-                "R2 storage service not configured. Set R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_REVIEW_ENDPOINT, and R2_REVIEW_BUCKET to enable."
++                "R2 storage service not configured. Set R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_REVIEW_ENDPOINT, and R2_REVIEW_BUCKET to enable review uploads and issue attachments."
+             );
+         }
+ 
+@@ -137,7 +137,7 @@ impl Server {
+             tracing::info!("Azure Blob storage service initialized");
+         } else {
+             tracing::info!(
+-                "Azure Blob storage not configured. Set AZURE_STORAGE_ACCOUNT_NAME and AZURE_STORAGE_ACCOUNT_KEY to enable issue attachments."
++                "Azure Blob storage not configured. Azure Blob attachment storage is deprecated in this downstream build."
+             );
+         }
+ 
+@@ -189,8 +189,8 @@ impl Server {
+             }
+         };
+ 
+-        if let Some(ref azure_blob_service) = azure_blob {
+-            spawn_cleanup_task(pool.clone(), azure_blob_service.clone());
++        if let Some(ref r2_service) = r2 {
++            spawn_cleanup_task(pool.clone(), r2_service.clone());
+         }
+ 
+         let digest_enabled = std::env::var("DIGEST_ENABLED")
+diff --git a/crates/remote/src/attachments/cleanup.rs b/crates/remote/src/attachments/cleanup.rs
+index 673c98a17..f71c5b6eb 100644
+--- a/crates/remote/src/attachments/cleanup.rs
++++ b/crates/remote/src/attachments/cleanup.rs
+@@ -5,7 +5,7 @@ use tokio::task::JoinHandle;
+ use tracing::{info, instrument, warn};
+ 
+ use crate::{
+-    azure_blob::AzureBlobService,
++    r2::R2Service,
+     db::{
+         attachments::AttachmentRepository, blobs::BlobRepository,
+         pending_uploads::PendingUploadRepository,
+@@ -17,7 +17,7 @@ const DEFAULT_INTERVAL: Duration = Duration::from_secs(3600);
+ 
+ /// Spawns a background task that periodically cleans up orphan attachments and
+ /// expired pending uploads. Call once during server startup.
+-pub(crate) fn spawn_cleanup_task(pool: PgPool, azure: AzureBlobService) -> JoinHandle<()> {
++pub(crate) fn spawn_cleanup_task(pool: PgPool, r2: R2Service) -> JoinHandle<()> {
+     let interval = std::env::var("ATTACHMENT_CLEANUP_INTERVAL_SECS")
+         .ok()
+         .and_then(|v| v.parse::<u64>().ok())
+@@ -36,18 +36,18 @@ pub(crate) fn spawn_cleanup_task(pool: PgPool, azure: AzureBlobService) -> JoinH
+ 
+         loop {
+             ticker.tick().await;
+-            run_sweep(&pool, &azure).await;
++            run_sweep(&pool, &r2).await;
+         }
+     })
+ }
+ 
+ #[instrument(name = "attachment_cleanup.sweep", skip_all)]
+-async fn run_sweep(pool: &PgPool, azure: &AzureBlobService) {
++async fn run_sweep(pool: &PgPool, r2: &R2Service) {
+     info!("Starting attachment cleanup sweep");
+ 
+     let (expired, pending) = tokio::join!(
+-        cleanup_expired_attachments(pool, azure),
+-        cleanup_expired_pending_uploads(pool, azure),
++        cleanup_expired_attachments(pool, r2),
++        cleanup_expired_pending_uploads(pool, r2),
+     );
+ 
+     match expired {
+@@ -63,7 +63,7 @@ async fn run_sweep(pool: &PgPool, azure: &AzureBlobService) {
+ 
+ async fn cleanup_expired_attachments(
+     pool: &PgPool,
+-    azure: &AzureBlobService,
++    r2: &R2Service,
+ ) -> anyhow::Result<u32> {
+     let expired = AttachmentRepository::find_expired(pool, EXPIRED_BATCH_SIZE).await?;
+     let mut deleted_count: u32 = 0;
+@@ -80,13 +80,13 @@ async fn cleanup_expired_attachments(
+         match AttachmentRepository::count_by_blob_id(pool, blob_id).await {
+             Ok(0) => {
+                 if let Ok(Some(blob)) = BlobRepository::delete(pool, blob_id).await {
+-                    if let Err(e) = azure.delete_blob(&blob.blob_path).await {
+-                        warn!(blob_path = %blob.blob_path, error = %e, "Failed to delete Azure blob");
++                    if let Err(e) = r2.delete_blob(&blob.blob_path).await {
++                        warn!(blob_path = %blob.blob_path, error = %e, "Failed to delete R2 blob");
+                     }
+                     if let Some(thumb_path) = &blob.thumbnail_blob_path
+-                        && let Err(e) = azure.delete_blob(thumb_path).await
++                        && let Err(e) = r2.delete_blob(thumb_path).await
+                     {
+-                        warn!(blob_path = %thumb_path, error = %e, "Failed to delete Azure thumbnail");
++                        warn!(blob_path = %thumb_path, error = %e, "Failed to delete R2 thumbnail");
+                     }
+                 }
+             }
+@@ -104,14 +104,14 @@ async fn cleanup_expired_attachments(
+ 
+ async fn cleanup_expired_pending_uploads(
+     pool: &PgPool,
+-    azure: &AzureBlobService,
++    r2: &R2Service,
+ ) -> anyhow::Result<u32> {
+     let expired = PendingUploadRepository::delete_expired(pool).await?;
+     let mut deleted_count: u32 = 0;
+ 
+     for pending in expired {
+-        if let Err(e) = azure.delete_blob(&pending.blob_path).await {
+-            warn!(blob_path = %pending.blob_path, error = %e, "Failed to delete Azure blob for expired pending upload");
++        if let Err(e) = r2.delete_blob(&pending.blob_path).await {
++            warn!(blob_path = %pending.blob_path, error = %e, "Failed to delete R2 blob for expired pending upload");
+         }
+         deleted_count += 1;
+     }
+diff --git a/crates/remote/src/r2.rs b/crates/remote/src/r2.rs
+index d40e6674a..135f6bd36 100644
+--- a/crates/remote/src/r2.rs
++++ b/crates/remote/src/r2.rs
+@@ -32,6 +32,18 @@ pub struct PresignedUpload {
+     pub expires_at: DateTime<Utc>,
+ }
+ 
++#[derive(Debug)]
++pub struct AttachmentUpload {
++    pub upload_url: String,
++    pub blob_path: String,
++    pub expires_at: DateTime<Utc>,
++}
++
++#[derive(Debug)]
++pub struct BlobProperties {
++    pub content_length: i64,
++}
++
+ #[derive(Debug, thiserror::Error)]
+ pub enum R2Error {
+     #[error("presign config error: {0}")]
+@@ -40,6 +52,8 @@ pub enum R2Error {
+     Presign(String),
+     #[error("upload error: {0}")]
+     Upload(String),
++    #[error("storage error: {0}")]
++    Storage(String),
+ }
+ 
+ impl R2Service {
+@@ -112,6 +126,124 @@ impl R2Service {
+         })
+     }
+ 
++    pub async fn create_upload_url(
++        &self,
++        blob_path: &str,
++        content_type: Option<&str>,
++    ) -> Result<AttachmentUpload, R2Error> {
++        let presigning_config = PresigningConfig::builder()
++            .expires_in(self.presign_expiry)
++            .build()
++            .map_err(|e| R2Error::PresignConfig(e.to_string()))?;
++
++        let mut request = self
++            .client
++            .put_object()
++            .bucket(&self.bucket)
++            .key(blob_path);
++
++        if let Some(ct) = content_type {
++            request = request.content_type(ct);
++        }
++
++        let presigned = request
++            .presigned(presigning_config)
++            .await
++            .map_err(|e| R2Error::Presign(e.to_string()))?;
++
++        let expires_at = Utc::now()
++            + chrono::Duration::from_std(self.presign_expiry).unwrap_or(chrono::Duration::hours(1));
++
++        Ok(AttachmentUpload {
++            upload_url: presigned.uri().to_string(),
++            blob_path: blob_path.to_string(),
++            expires_at,
++        })
++    }
++
++    pub async fn create_read_url(&self, blob_path: &str) -> Result<String, R2Error> {
++        let presigning_config = PresigningConfig::builder()
++            .expires_in(self.presign_expiry)
++            .build()
++            .map_err(|e| R2Error::PresignConfig(e.to_string()))?;
++
++        let presigned = self
++            .client
++            .get_object()
++            .bucket(&self.bucket)
++            .key(blob_path)
++            .presigned(presigning_config)
++            .await
++            .map_err(|e| R2Error::Presign(e.to_string()))?;
++
++        Ok(presigned.uri().to_string())
++    }
++
++    pub async fn get_blob_properties(&self, blob_path: &str) -> Result<BlobProperties, R2Error> {
++        let output = self
++            .client
++            .head_object()
++            .bucket(&self.bucket)
++            .key(blob_path)
++            .send()
++            .await
++            .map_err(|e| R2Error::Storage(e.to_string()))?;
++
++        Ok(BlobProperties {
++            content_length: output.content_length().unwrap_or(0),
++        })
++    }
++
++    pub async fn download_blob(&self, blob_path: &str) -> Result<Vec<u8>, R2Error> {
++        let output = self
++            .client
++            .get_object()
++            .bucket(&self.bucket)
++            .key(blob_path)
++            .send()
++            .await
++            .map_err(|e| R2Error::Storage(e.to_string()))?;
++
++        let body = output
++            .body
++            .collect()
++            .await
++            .map_err(|e| R2Error::Storage(e.to_string()))?;
++
++        Ok(body.into_bytes().to_vec())
++    }
++
++    pub async fn upload_blob(
++        &self,
++        blob_path: &str,
++        data: Vec<u8>,
++        content_type: String,
++    ) -> Result<(), R2Error> {
++        self.client
++            .put_object()
++            .bucket(&self.bucket)
++            .key(blob_path)
++            .body(ByteStream::from(data))
++            .content_type(content_type)
++            .send()
++            .await
++            .map_err(|e| R2Error::Upload(e.to_string()))?;
++
++        Ok(())
++    }
++
++    pub async fn delete_blob(&self, blob_path: &str) -> Result<(), R2Error> {
++        self.client
++            .delete_object()
++            .bucket(&self.bucket)
++            .key(blob_path)
++            .send()
++            .await
++            .map_err(|e| R2Error::Storage(e.to_string()))?;
++
++        Ok(())
++    }
++
+     /// Upload bytes directly to R2 (for server-side uploads).
+     ///
+     /// Returns the folder path (e.g., "reviews/{review_id}") to store in the database.
+diff --git a/crates/remote/src/routes/attachments.rs b/crates/remote/src/routes/attachments.rs
+index 05c7533a8..440764d45 100644
+--- a/crates/remote/src/routes/attachments.rs
++++ b/crates/remote/src/routes/attachments.rs
+@@ -21,7 +21,7 @@ use crate::{
+     AppState,
+     attachments::thumbnail::ThumbnailService,
+     auth::RequestContext,
+-    azure_blob::AzureBlobError,
++    r2::R2Error,
+     db::{
+         attachments::{AttachmentError, AttachmentRepository},
+         blobs::{BlobError, BlobRepository},
+@@ -100,10 +100,10 @@ pub struct CommitAttachmentsResponse {
+ 
+ #[derive(Debug, thiserror::Error)]
+ pub enum RouteError {
+-    #[error("Azure Blob storage not configured")]
++    #[error("R2 storage not configured")]
+     NotConfigured,
+-    #[error("Azure Blob error: {0}")]
+-    AzureBlob(#[from] AzureBlobError),
++    #[error("R2 storage error: {0}")]
++    R2(#[from] R2Error),
+     #[error("attachment error: {0}")]
+     Attachment(#[from] AttachmentError),
+     #[error("blob error: {0}")]
+@@ -131,8 +131,8 @@ impl IntoResponse for RouteError {
+                 StatusCode::SERVICE_UNAVAILABLE,
+                 "Attachment storage not available",
+             ),
+-            RouteError::AzureBlob(e) => {
+-                tracing::error!(error = %e, "Azure Blob error");
++            RouteError::R2(e) => {
++                tracing::error!(error = %e, "R2 storage error");
+                 (StatusCode::INTERNAL_SERVER_ERROR, "Storage error")
+             }
+             RouteError::Attachment(e) => {
+@@ -187,8 +187,8 @@ async fn init_upload(
+     if let Some(existing) =
+         BlobRepository::find_by_hash(state.pool(), payload.project_id, &payload.hash).await?
+     {
+-        let azure = state.azure_blob().ok_or(RouteError::NotConfigured)?;
+-        let read_url = azure.create_read_url(&existing.blob_path)?;
++        let r2 = state.r2().ok_or(RouteError::NotConfigured)?;
++        let read_url = r2.create_read_url(&existing.blob_path).await?;
+ 
+         return Ok(Json(InitUploadResponse {
+             upload_url: read_url,
+@@ -199,7 +199,7 @@ async fn init_upload(
+         }));
+     }
+ 
+-    let azure = state.azure_blob().ok_or(RouteError::NotConfigured)?;
++    let r2 = state.r2().ok_or(RouteError::NotConfigured)?;
+     let sanitized_filename = sanitize_filename(&payload.filename);
+     let blob_path = format!(
+         "attachments/{}/{}_{}",
+@@ -207,7 +207,7 @@ async fn init_upload(
+         Uuid::new_v4(),
+         sanitized_filename
+     );
+-    let upload = azure.create_upload_url(&blob_path)?;
++    let upload = r2.create_upload_url(&blob_path, None).await?;
+ 
+     let pending = PendingUploadRepository::create(
+         state.pool(),
+@@ -248,7 +248,7 @@ async fn confirm_upload(
+             .map_err(|_| RouteError::AccessDenied)?;
+     }
+ 
+-    let azure = state.azure_blob().ok_or(RouteError::NotConfigured)?;
++    let r2 = state.r2().ok_or(RouteError::NotConfigured)?;
+ 
+     let blob = if let Some(existing) =
+         BlobRepository::find_by_hash(state.pool(), payload.project_id, &payload.hash).await?
+@@ -261,13 +261,13 @@ async fn confirm_upload(
+ 
+         let blob_path = &pending.blob_path;
+ 
+-        let props = azure.get_blob_properties(blob_path).await?;
++        let props = r2.get_blob_properties(blob_path).await?;
+         if props.content_length > MAX_FILE_SIZE {
+-            let _ = azure.delete_blob(blob_path).await;
++            let _ = r2.delete_blob(blob_path).await;
+             return Err(RouteError::FileTooLarge);
+         }
+ 
+-        let blob_data = azure.download_blob(blob_path).await?;
++        let blob_data = r2.download_blob(blob_path).await?;
+         let thumbnail_result =
+             ThumbnailService::generate(&blob_data, payload.content_type.as_deref())
+                 .map_err(|e| RouteError::ThumbnailError(e.to_string()))?;
+@@ -277,7 +277,7 @@ async fn confirm_upload(
+         let (thumbnail_blob_path, width, height) = match thumbnail_result {
+             Some(thumb) => {
+                 let thumb_path = format!("thumbnails/{}", blob_path);
+-                azure
++                r2
+                     .upload_blob(&thumb_path, thumb.bytes, thumb.mime_type)
+                     .await?;
+                 (
+@@ -372,18 +372,19 @@ async fn list_issue_attachments(
+         .await
+         .map_err(|_| RouteError::AccessDenied)?;
+ 
+-    let azure = state.azure_blob();
+-    let attachments = AttachmentRepository::find_by_issue_id(state.pool(), issue_id)
+-        .await?
+-        .into_iter()
+-        .map(|a| {
+-            let file_url = azure.and_then(|az| az.create_read_url(&a.blob_path).ok());
+-            AttachmentWithUrl {
+-                attachment: a,
+-                file_url,
+-            }
+-        })
+-        .collect();
++    let r2 = state.r2();
++    let mut attachments = Vec::new();
++    for attachment in AttachmentRepository::find_by_issue_id(state.pool(), issue_id).await? {
++        let file_url = if let Some(service) = r2 {
++            service.create_read_url(&attachment.blob_path).await.ok()
++        } else {
++            None
++        };
++        attachments.push(AttachmentWithUrl {
++            attachment,
++            file_url,
++        });
++    }
+     Ok(Json(ListAttachmentsResponse { attachments }))
+ }
+ 
+@@ -397,18 +398,19 @@ async fn list_comment_attachments(
+         .await
+         .map_err(|_| RouteError::AccessDenied)?;
+ 
+-    let azure = state.azure_blob();
+-    let attachments = AttachmentRepository::find_by_comment_id(state.pool(), comment_id)
+-        .await?
+-        .into_iter()
+-        .map(|a| {
+-            let file_url = azure.and_then(|az| az.create_read_url(&a.blob_path).ok());
+-            AttachmentWithUrl {
+-                attachment: a,
+-                file_url,
+-            }
+-        })
+-        .collect();
++    let r2 = state.r2();
++    let mut attachments = Vec::new();
++    for attachment in AttachmentRepository::find_by_comment_id(state.pool(), comment_id).await? {
++        let file_url = if let Some(service) = r2 {
++            service.create_read_url(&attachment.blob_path).await.ok()
++        } else {
++            None
++        };
++        attachments.push(AttachmentWithUrl {
++            attachment,
++            file_url,
++        });
++    }
+     Ok(Json(ListAttachmentsResponse { attachments }))
+ }
+ 
+@@ -424,8 +426,8 @@ async fn get_attachment_file(
+ 
+     ensure_attachment_access(&state, ctx.user.id, &attachment).await?;
+ 
+-    let azure = state.azure_blob().ok_or(RouteError::NotConfigured)?;
+-    let url = azure.create_read_url(&attachment.blob_path)?;
++    let r2 = state.r2().ok_or(RouteError::NotConfigured)?;
++    let url = r2.create_read_url(&attachment.blob_path).await?;
+     Ok(Json(AttachmentUrlResponse { url }))
+ }
+ 
+@@ -444,8 +446,8 @@ async fn get_attachment_thumbnail(
+     let thumbnail_path = attachment
+         .thumbnail_blob_path
+         .ok_or(RouteError::NoThumbnail)?;
+-    let azure = state.azure_blob().ok_or(RouteError::NotConfigured)?;
+-    let url = azure.create_read_url(&thumbnail_path)?;
++    let r2 = state.r2().ok_or(RouteError::NotConfigured)?;
++    let url = r2.create_read_url(&thumbnail_path).await?;
+     Ok(Json(AttachmentUrlResponse { url }))
+ }
+ 
+@@ -468,12 +470,12 @@ async fn delete_attachment(
+     if remaining == 0
+         && let Some(blob) = BlobRepository::delete(state.pool(), blob_id).await?
+     {
+-        let azure = state.azure_blob().ok_or(RouteError::NotConfigured)?;
+-        if let Err(e) = azure.delete_blob(&blob.blob_path).await {
++        let r2 = state.r2().ok_or(RouteError::NotConfigured)?;
++        if let Err(e) = r2.delete_blob(&blob.blob_path).await {
+             tracing::warn!(error = %e, blob_path = %blob.blob_path, "Failed to delete blob");
+         }
+         if let Some(thumb_path) = blob.thumbnail_blob_path
+-            && let Err(e) = azure.delete_blob(&thumb_path).await
++            && let Err(e) = r2.delete_blob(&thumb_path).await
+         {
+             tracing::warn!(error = %e, blob_path = %thumb_path, "Failed to delete thumbnail");
+         }
+-- 
+2.50.1
+

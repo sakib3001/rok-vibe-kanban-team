@@ -1,0 +1,274 @@
+From 74dfa9feecc917f40ae83a8900183e2abbaff2bf Mon Sep 17 00:00:00 2001
+From: Riajul Islam <riajul@kahf.co>
+Date: Tue, 14 Apr 2026 06:27:05 +0000
+Subject: [PATCH] downstream:
+ 0014-fix-remote-add-attachment-upload-relay-for-legacy-cl
+
+---
+ crates/remote/Cargo.toml                |  2 +-
+ crates/remote/src/r2.rs                 | 33 ++++++++----
+ crates/remote/src/routes/attachments.rs | 67 +++++++++++++++++++++----
+ crates/remote/src/routes/mod.rs         |  1 +
+ 4 files changed, 83 insertions(+), 20 deletions(-)
+
+diff --git a/crates/remote/Cargo.toml b/crates/remote/Cargo.toml
+index 47bb528a9..ce7a4fbe6 100644
+--- a/crates/remote/Cargo.toml
++++ b/crates/remote/Cargo.toml
+@@ -57,7 +57,7 @@ hex = "0.4"
+ urlencoding = "2.1"
+ url = "2.5"
+ base64 = "0.22"
+-aws-sdk-s3 = { version = "1.65", default-features = false, features = ["behavior-version-latest", "rt-tokio"] }
++aws-sdk-s3 = { version = "1.65", default-features = false, features = ["behavior-version-latest", "rt-tokio", "rustls", "default-https-client"] }
+ aws-credential-types = "1.2"
+ azure_core = "0.31"
+ azure_storage_blob = "0.8"
+diff --git a/crates/remote/src/r2.rs b/crates/remote/src/r2.rs
+index 135f6bd36..659abf58e 100644
+--- a/crates/remote/src/r2.rs
++++ b/crates/remote/src/r2.rs
+@@ -1,4 +1,4 @@
+-use std::time::Duration;
++use std::{error::Error as StdError, time::Duration};
+ 
+ use aws_credential_types::Credentials;
+ use aws_sdk_s3::{
+@@ -56,6 +56,19 @@ pub enum R2Error {
+     Storage(String),
+ }
+ 
++fn format_error_chain<E: StdError>(err: &E) -> String {
++    let mut message = err.to_string();
++    let mut source = err.source();
++
++    while let Some(cause) = source {
++        message.push_str(": ");
++        message.push_str(&cause.to_string());
++        source = cause.source();
++    }
++
++    message
++}
++
+ impl R2Service {
+     pub fn new(config: &R2Config) -> Self {
+         let credentials = Credentials::new(
+@@ -113,7 +126,7 @@ impl R2Service {
+         let presigned = request
+             .presigned(presigning_config)
+             .await
+-            .map_err(|e| R2Error::Presign(e.to_string()))?;
++            .map_err(|e| R2Error::Presign(format_error_chain(&e)))?;
+ 
+         let expires_at = Utc::now()
+             + chrono::Duration::from_std(self.presign_expiry).unwrap_or(chrono::Duration::hours(1));
+@@ -149,7 +162,7 @@ impl R2Service {
+         let presigned = request
+             .presigned(presigning_config)
+             .await
+-            .map_err(|e| R2Error::Presign(e.to_string()))?;
++            .map_err(|e| R2Error::Presign(format_error_chain(&e)))?;
+ 
+         let expires_at = Utc::now()
+             + chrono::Duration::from_std(self.presign_expiry).unwrap_or(chrono::Duration::hours(1));
+@@ -174,7 +187,7 @@ impl R2Service {
+             .key(blob_path)
+             .presigned(presigning_config)
+             .await
+-            .map_err(|e| R2Error::Presign(e.to_string()))?;
++            .map_err(|e| R2Error::Presign(format_error_chain(&e)))?;
+ 
+         Ok(presigned.uri().to_string())
+     }
+@@ -187,7 +200,7 @@ impl R2Service {
+             .key(blob_path)
+             .send()
+             .await
+-            .map_err(|e| R2Error::Storage(e.to_string()))?;
++            .map_err(|e| R2Error::Storage(format_error_chain(&e)))?;
+ 
+         Ok(BlobProperties {
+             content_length: output.content_length().unwrap_or(0),
+@@ -202,13 +215,13 @@ impl R2Service {
+             .key(blob_path)
+             .send()
+             .await
+-            .map_err(|e| R2Error::Storage(e.to_string()))?;
++            .map_err(|e| R2Error::Storage(format_error_chain(&e)))?;
+ 
+         let body = output
+             .body
+             .collect()
+             .await
+-            .map_err(|e| R2Error::Storage(e.to_string()))?;
++            .map_err(|e| R2Error::Storage(format_error_chain(&e)))?;
+ 
+         Ok(body.into_bytes().to_vec())
+     }
+@@ -227,7 +240,7 @@ impl R2Service {
+             .content_type(content_type)
+             .send()
+             .await
+-            .map_err(|e| R2Error::Upload(e.to_string()))?;
++            .map_err(|e| R2Error::Upload(format_error_chain(&e)))?;
+ 
+         Ok(())
+     }
+@@ -239,7 +252,7 @@ impl R2Service {
+             .key(blob_path)
+             .send()
+             .await
+-            .map_err(|e| R2Error::Storage(e.to_string()))?;
++            .map_err(|e| R2Error::Storage(format_error_chain(&e)))?;
+ 
+         Ok(())
+     }
+@@ -259,7 +272,7 @@ impl R2Service {
+             .content_type("application/gzip")
+             .send()
+             .await
+-            .map_err(|e| R2Error::Upload(e.to_string()))?;
++            .map_err(|e| R2Error::Upload(format_error_chain(&e)))?;
+ 
+         Ok(folder_path)
+     }
+diff --git a/crates/remote/src/routes/attachments.rs b/crates/remote/src/routes/attachments.rs
+index 440764d45..fe5655871 100644
+--- a/crates/remote/src/routes/attachments.rs
++++ b/crates/remote/src/routes/attachments.rs
+@@ -3,10 +3,11 @@ use api_types::{
+ };
+ use axum::{
+     Json, Router,
++    body::Bytes,
+     extract::{Extension, Path, State},
+-    http::StatusCode,
++    http::{HeaderMap, StatusCode, header},
+     response::{IntoResponse, Response},
+-    routing::{delete, get, post},
++    routing::{delete, get, post, put},
+ };
+ use chrono::{DateTime, Utc};
+ use serde::{Deserialize, Serialize};
+@@ -54,6 +55,10 @@ pub fn router() -> Router<AppState> {
+         )
+ }
+ 
++pub fn public_router() -> Router<AppState> {
++    Router::new().route("/attachments/upload/{upload_id}", put(upload_pending_upload))
++}
++
+ #[derive(Debug, Serialize, Deserialize, TS)]
+ pub struct InitUploadRequest {
+     pub project_id: Uuid,
+@@ -199,7 +204,7 @@ async fn init_upload(
+         }));
+     }
+ 
+-    let r2 = state.r2().ok_or(RouteError::NotConfigured)?;
++    state.r2().ok_or(RouteError::NotConfigured)?;
+     let sanitized_filename = sanitize_filename(&payload.filename);
+     let blob_path = format!(
+         "attachments/{}/{}_{}",
+@@ -207,26 +212,67 @@ async fn init_upload(
+         Uuid::new_v4(),
+         sanitized_filename
+     );
+-    let upload = r2.create_upload_url(&blob_path, None).await?;
++
++    let expires_at = Utc::now() + chrono::Duration::minutes(5);
+ 
+     let pending = PendingUploadRepository::create(
+         state.pool(),
+         payload.project_id,
+-        upload.blob_path,
++        blob_path,
+         payload.hash.clone(),
+-        upload.expires_at,
++        expires_at,
+     )
+     .await?;
+ 
++    let upload_url = format!(
++        "{}/v1/attachments/upload/{}",
++        state.server_public_base_url.trim_end_matches('/'),
++        pending.id
++    );
++
+     Ok(Json(InitUploadResponse {
+-        upload_url: upload.upload_url,
++        upload_url,
+         upload_id: pending.id,
+-        expires_at: upload.expires_at,
++        expires_at,
+         skip_upload: false,
+         existing_blob_id: None,
+     }))
+ }
+ 
++#[instrument(name = "attachments.upload_pending", skip(state, headers, body), fields(upload_id = %upload_id))]
++async fn upload_pending_upload(
++    State(state): State<AppState>,
++    Path(upload_id): Path<Uuid>,
++    headers: HeaderMap,
++    body: Bytes,
++) -> Result<StatusCode, RouteError> {
++    if body.len() as i64 > MAX_FILE_SIZE {
++        return Err(RouteError::FileTooLarge);
++    }
++
++    let pending = PendingUploadRepository::find_by_id(state.pool(), upload_id)
++        .await?
++        .ok_or(RouteError::UploadNotFound)?;
++
++    if pending.expires_at < Utc::now() {
++        return Err(RouteError::UploadNotFound);
++    }
++
++    let content_type = headers
++        .get(header::CONTENT_TYPE)
++        .and_then(|v| v.to_str().ok())
++        .filter(|v| !v.is_empty())
++        .unwrap_or("application/octet-stream")
++        .to_string();
++
++    let r2 = state.r2().ok_or(RouteError::NotConfigured)?;
++    r2.upload_blob(&pending.blob_path, body.to_vec(), content_type)
++        .await?;
++
++    // Keep legacy client compatibility: existing uploader treats 201 as success.
++    Ok(StatusCode::CREATED)
++}
++
+ #[instrument(name = "attachments.confirm_upload", skip(state, ctx, payload), fields(project_id = %payload.project_id, user_id = %ctx.user.id))]
+ async fn confirm_upload(
+     State(state): State<AppState>,
+@@ -259,8 +305,11 @@ async fn confirm_upload(
+             .await?
+             .ok_or(RouteError::UploadNotFound)?;
+ 
+-        let blob_path = &pending.blob_path;
++        if pending.expires_at < Utc::now() {
++            return Err(RouteError::UploadNotFound);
++        }
+ 
++        let blob_path = &pending.blob_path;
+         let props = r2.get_blob_properties(blob_path).await?;
+         if props.content_length > MAX_FILE_SIZE {
+             let _ = r2.delete_blob(blob_path).await;
+diff --git a/crates/remote/src/routes/mod.rs b/crates/remote/src/routes/mod.rs
+index 834b0f4cf..ae4f590dd 100644
+--- a/crates/remote/src/routes/mod.rs
++++ b/crates/remote/src/routes/mod.rs
+@@ -105,6 +105,7 @@ pub fn router(state: AppState) -> Router {
+         .merge(oauth::public_router())
+         .merge(organization_members::public_router())
+         .merge(tokens::public_router())
++        .merge(attachments::public_router())
+         .merge(review::public_router())
+         .merge(github_app::public_router())
+         .merge(billing::public_router());
+-- 
+2.50.1
+

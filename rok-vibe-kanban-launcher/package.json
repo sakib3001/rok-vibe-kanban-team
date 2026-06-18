@@ -1,0 +1,19 @@
+{
+  "name": "@rokomari/vibe-kanban",
+  "version": "1.0.0",
+  "description": "Rokomari's standardized Vibe Kanban launcher. Pins the client version and points it at the central server (vk.rokomari.io) with zero manual config.",
+  "bin": {
+    "rok-vibe-kanban": "bin/rok-vibe-kanban.js"
+  },
+  "dependencies": {
+    "vibe-kanban-team": "0.1.44-20260617110518"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "bin",
+    "README.md"
+  ],
+  "license": "MIT"
+}

@@ -1,0 +1,464 @@
+From c872dc8a6695325937d797bfa4e6bd26e1ddefbf Mon Sep 17 00:00:00 2001
+From: Riajul Islam <kmriajulislami@gmail.com>
+Date: Mon, 8 Jun 2026 14:33:33 +0600
+Subject: [PATCH] feat: add AntiGravity model effort selection
+
+---
+ crates/executors/src/executors/antigravity.rs | 337 +++++++++++++++++-
+ shared/schemas/anti_gravity.json              |   8 +
+ shared/types.ts                               |   2 +-
+ 3 files changed, 331 insertions(+), 16 deletions(-)
+
+diff --git a/crates/executors/src/executors/antigravity.rs b/crates/executors/src/executors/antigravity.rs
+index 40213faf5..865898799 100644
+--- a/crates/executors/src/executors/antigravity.rs
++++ b/crates/executors/src/executors/antigravity.rs
+@@ -6,6 +6,7 @@ use std::{
+         Arc,
+         atomic::{AtomicU32, Ordering},
+     },
++    time::Duration,
+ };
+ 
+ use async_trait::async_trait;
+@@ -33,13 +34,24 @@ use crate::{
+             patch::{self, add_normalized_entry, replace_normalized_entry},
+         },
+     },
+-    model_selector::{ModelSelectorConfig, PermissionPolicy},
++    model_selector::{ModelInfo, ModelSelectorConfig, PermissionPolicy, ReasoningOption},
+     profile::ExecutorConfig,
+ };
+ 
+ const DEFAULT_ANTIGRAVITY_CONTEXT_WINDOW: u32 = 1_048_576;
++const ANTIGRAVITY_MODEL_DISCOVERY_TIMEOUT_SECS: u64 = 10;
+ const PROMPT_CHARS_MARKER: &str = "VIBE_KANBAN_AGY_PROMPT_CHARS=";
+ const CONVERSATION_ID_MARKER: &str = "VIBE_KANBAN_AGY_CONVERSATION_ID=";
++const FALLBACK_ANTIGRAVITY_MODELS: &[&str] = &[
++    "Gemini 3.5 Flash (Medium)",
++    "Gemini 3.5 Flash (High)",
++    "Gemini 3.5 Flash (Low)",
++    "Gemini 3.1 Pro (Low)",
++    "Gemini 3.1 Pro (High)",
++    "Claude Sonnet 4.6 (Thinking)",
++    "Claude Opus 4.6 (Thinking)",
++    "GPT-OSS 120B (Medium)",
++];
+ 
+ const AGY_WRAPPER_SCRIPT: &str = r#"
+ agy_bin=$1
+@@ -75,6 +87,12 @@ pub struct AntiGravity {
+     )]
+     pub model: Option<String>,
+     #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[schemars(
++        title = "Effort",
++        description = "Model effort variant from `agy models`, combined with the base model name for `agy --model`."
++    )]
++    pub effort: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
+     #[schemars(
+         title = "Dangerously Skip Permissions",
+         description = "Pass `--dangerously-skip-permissions` to AntiGravity CLI."
+@@ -120,8 +138,8 @@ impl AntiGravity {
+             builder = builder.extend_params(["--sandbox"]);
+         }
+ 
+-        if let Some(model) = &self.model {
+-            builder = builder.extend_params(["--model", model]);
++        if let Some(model) = self.effective_model_arg() {
++            builder = builder.extend_params(["--model", model.as_str()]);
+         }
+ 
+         if let Some(timeout) = &self.print_timeout {
+@@ -137,6 +155,10 @@ impl AntiGravity {
+         apply_overrides(builder, &self.cmd)
+     }
+ 
++    fn effective_model_arg(&self) -> Option<String> {
++        compose_antigravity_model_arg(self.model.as_deref(), self.effort.as_deref())
++    }
++
+     async fn spawn_internal(
+         &self,
+         current_dir: &Path,
+@@ -182,6 +204,9 @@ impl StandardCodingAgentExecutor for AntiGravity {
+         if let Some(model_id) = &executor_config.model_id {
+             self.model = Some(model_id.clone());
+         }
++        if let Some(reasoning_id) = &executor_config.reasoning_id {
++            self.effort = Some(reasoning_id.clone());
++        }
+         if let Some(permission_policy) = executor_config.permission_policy.clone() {
+             self.dangerously_skip_permissions =
+                 Some(matches!(permission_policy, PermissionPolicy::Auto));
+@@ -243,31 +268,49 @@ impl StandardCodingAgentExecutor for AntiGravity {
+     }
+ 
+     fn get_preset_options(&self) -> ExecutorConfig {
++        let (model_id, reasoning_id) =
++            preset_model_and_reasoning(self.model.as_deref(), self.effort.as_deref());
+         ExecutorConfig {
+             executor: BaseCodingAgent::AntiGravity,
+             variant: None,
+-            model_id: self.model.clone(),
++            model_id,
+             agent_id: None,
+-            reasoning_id: None,
++            reasoning_id,
+             permission_policy: Some(PermissionPolicy::Auto),
+         }
+     }
+ 
+     async fn discover_options(
+         &self,
+-        _workdir: Option<&Path>,
+-        _repo_path: Option<&Path>,
++        workdir: Option<&Path>,
++        repo_path: Option<&Path>,
+     ) -> Result<futures::stream::BoxStream<'static, json_patch::Patch>, ExecutorError> {
+-        let options = ExecutorDiscoveredOptions {
+-            model_selector: ModelSelectorConfig {
+-                permissions: vec![PermissionPolicy::Auto],
+-                ..Default::default()
+-            },
++        let discovery_dir = workdir
++            .or(repo_path)
++            .unwrap_or_else(|| Path::new("."))
++            .to_path_buf();
++        let mut initial_options = ExecutorDiscoveredOptions {
++            model_selector: antigravity_model_selector_config(&fallback_antigravity_model_lines()),
++            loading_models: true,
+             ..Default::default()
+         };
+-        Ok(Box::pin(futures::stream::once(async move {
+-            patch::executor_discovered_options(options)
+-        })))
++        initial_options.loading_agents = false;
++        initial_options.loading_slash_commands = false;
++
++        let initial_patch = patch::executor_discovered_options(initial_options);
++        let cmd = self.cmd.clone();
++
++        let discovery_stream = async_stream::stream! {
++            let model_lines = discover_antigravity_model_lines(&cmd, &discovery_dir).await;
++            let model_selector = antigravity_model_selector_config(&model_lines);
++            yield patch::update_models(model_selector.models);
++            yield patch::update_default_model(model_selector.default_model);
++            yield patch::models_loaded();
++        };
++
++        Ok(Box::pin(
++            futures::stream::once(async move { initial_patch }).chain(discovery_stream),
++        ))
+     }
+ }
+ 
+@@ -470,6 +513,223 @@ fn add_token_usage_entry(
+     );
+ }
+ 
++async fn discover_antigravity_model_lines(cmd: &CmdOverrides, current_dir: &Path) -> Vec<String> {
++    let command_parts = match antigravity_discovery_command(cmd)
++        .and_then(|builder| builder.build_follow_up(&["models".to_string()]))
++    {
++        Ok(parts) => parts,
++        Err(error) => {
++            tracing::warn!("Failed to build AntiGravity model discovery command: {error}");
++            return fallback_antigravity_model_lines();
++        }
++    };
++
++    let (program_path, args) = match command_parts.into_resolved().await {
++        Ok(parts) => parts,
++        Err(error) => {
++            tracing::warn!("Failed to resolve AntiGravity model discovery command: {error}");
++            return fallback_antigravity_model_lines();
++        }
++    };
++
++    let mut command = Command::new(program_path);
++    command
++        .kill_on_drop(true)
++        .stdin(Stdio::null())
++        .stdout(Stdio::piped())
++        .stderr(Stdio::piped())
++        .current_dir(current_dir)
++        .args(args);
++
++    if let Some(env_vars) = &cmd.env {
++        command.envs(env_vars);
++    }
++
++    match tokio::time::timeout(
++        Duration::from_secs(ANTIGRAVITY_MODEL_DISCOVERY_TIMEOUT_SECS),
++        command.output(),
++    )
++    .await
++    {
++        Ok(Ok(output)) if output.status.success() => {
++            let lines = String::from_utf8_lossy(&output.stdout)
++                .lines()
++                .map(str::trim)
++                .filter(|line| !line.is_empty())
++                .map(str::to_string)
++                .collect::<Vec<_>>();
++            if lines.is_empty() {
++                fallback_antigravity_model_lines()
++            } else {
++                lines
++            }
++        }
++        Ok(Ok(output)) => {
++            tracing::warn!(
++                "AntiGravity model discovery failed: {}",
++                String::from_utf8_lossy(&output.stderr).trim()
++            );
++            fallback_antigravity_model_lines()
++        }
++        Ok(Err(error)) => {
++            tracing::warn!("AntiGravity model discovery failed: {error}");
++            fallback_antigravity_model_lines()
++        }
++        Err(_) => {
++            tracing::warn!(
++                "AntiGravity model discovery timed out after {ANTIGRAVITY_MODEL_DISCOVERY_TIMEOUT_SECS}s"
++            );
++            fallback_antigravity_model_lines()
++        }
++    }
++}
++
++fn antigravity_discovery_command(cmd: &CmdOverrides) -> Result<CommandBuilder, CommandBuildError> {
++    let builder = CommandBuilder::new("agy");
++    Ok(if let Some(base) = &cmd.base_command_override {
++        builder.override_base(base.clone())
++    } else {
++        builder
++    })
++}
++
++fn fallback_antigravity_model_lines() -> Vec<String> {
++    FALLBACK_ANTIGRAVITY_MODELS
++        .iter()
++        .map(|line| (*line).to_string())
++        .collect()
++}
++
++fn antigravity_model_selector_config(lines: &[String]) -> ModelSelectorConfig {
++    let mut models = Vec::<ModelInfo>::new();
++
++    for line in lines {
++        let (base_model, effort) = split_model_effort(line);
++        if base_model.is_empty() {
++            continue;
++        }
++
++        if let Some(model) = models
++            .iter_mut()
++            .find(|model| model.id.eq_ignore_ascii_case(&base_model))
++        {
++            if let Some(effort) = effort {
++                push_effort_option(&mut model.reasoning_options, &effort);
++            }
++            continue;
++        }
++
++        let mut reasoning_options = Vec::new();
++        if let Some(effort) = effort {
++            push_effort_option(&mut reasoning_options, &effort);
++        }
++
++        models.push(ModelInfo {
++            id: base_model.clone(),
++            name: base_model,
++            provider_id: None,
++            reasoning_options,
++        });
++    }
++
++    if models.is_empty() {
++        return antigravity_model_selector_config(&fallback_antigravity_model_lines());
++    }
++
++    ModelSelectorConfig {
++        default_model: models.first().map(|model| model.id.clone()),
++        models,
++        permissions: vec![PermissionPolicy::Auto],
++        ..Default::default()
++    }
++}
++
++fn push_effort_option(options: &mut Vec<ReasoningOption>, effort: &str) {
++    let id = normalize_effort_id(effort);
++    if id.is_empty() || options.iter().any(|option| option.id == id) {
++        return;
++    }
++
++    options.push(ReasoningOption {
++        id,
++        label: effort_label(effort),
++        is_default: options.is_empty(),
++    });
++}
++
++fn compose_antigravity_model_arg(model: Option<&str>, effort: Option<&str>) -> Option<String> {
++    let model = model.map(str::trim).filter(|model| !model.is_empty())?;
++    let (base_model, embedded_effort) = split_model_effort(model);
++    let selected_effort = effort
++        .map(str::trim)
++        .filter(|effort| !effort.is_empty())
++        .map(effort_label)
++        .or(embedded_effort);
++
++    Some(match selected_effort {
++        Some(effort) => format!("{base_model} ({effort})"),
++        None => base_model,
++    })
++}
++
++fn preset_model_and_reasoning(
++    model: Option<&str>,
++    effort: Option<&str>,
++) -> (Option<String>, Option<String>) {
++    let Some(model) = model.map(str::trim).filter(|model| !model.is_empty()) else {
++        return (None, None);
++    };
++
++    let (base_model, embedded_effort) = split_model_effort(model);
++    let reasoning_id = effort
++        .map(str::trim)
++        .filter(|effort| !effort.is_empty())
++        .map(normalize_effort_id)
++        .or_else(|| embedded_effort.as_deref().map(normalize_effort_id));
++
++    (Some(base_model), reasoning_id)
++}
++
++fn split_model_effort(value: &str) -> (String, Option<String>) {
++    let trimmed = value.trim();
++    if let Some(without_suffix) = trimmed.strip_suffix(')')
++        && let Some(idx) = without_suffix.rfind(" (")
++    {
++        let base = without_suffix[..idx].trim();
++        let effort = without_suffix[idx + 2..].trim();
++        if !base.is_empty() && !effort.is_empty() {
++            return (base.to_string(), Some(effort.to_string()));
++        }
++    }
++
++    (trimmed.to_string(), None)
++}
++
++fn normalize_effort_id(effort: &str) -> String {
++    effort.trim().to_ascii_lowercase().replace(' ', "-")
++}
++
++fn effort_label(effort: &str) -> String {
++    match normalize_effort_id(effort).as_str() {
++        "low" => "Low".to_string(),
++        "medium" => "Medium".to_string(),
++        "high" => "High".to_string(),
++        "thinking" => "Thinking".to_string(),
++        value => value
++            .split(['-', '_'])
++            .filter(|part| !part.is_empty())
++            .map(|part| {
++                let mut chars = part.chars();
++                match chars.next() {
++                    Some(first) => first.to_uppercase().chain(chars).collect::<String>(),
++                    None => String::new(),
++                }
++            })
++            .collect::<Vec<_>>()
++            .join(" "),
++    }
++}
++
+ fn estimate_tokens(text: &str) -> u32 {
+     estimate_tokens_from_chars(text.chars().count().try_into().unwrap_or(u32::MAX))
+ }
+@@ -529,4 +789,51 @@ mod tests {
+         assert_eq!(estimate_tokens_from_chars(4), 1);
+         assert_eq!(estimate_tokens_from_chars(5), 2);
+     }
++
++    #[test]
++    fn groups_model_efforts_for_selector() {
++        let lines = fallback_antigravity_model_lines();
++        let config = antigravity_model_selector_config(&lines);
++
++        let flash = config
++            .models
++            .iter()
++            .find(|model| model.id == "Gemini 3.5 Flash")
++            .expect("flash model");
++        assert_eq!(config.default_model.as_deref(), Some("Gemini 3.5 Flash"));
++        assert_eq!(
++            flash
++                .reasoning_options
++                .iter()
++                .map(|option| (option.id.as_str(), option.label.as_str(), option.is_default))
++                .collect::<Vec<_>>(),
++            vec![
++                ("medium", "Medium", true),
++                ("high", "High", false),
++                ("low", "Low", false),
++            ]
++        );
++    }
++
++    #[test]
++    fn composes_cli_model_from_base_and_effort() {
++        assert_eq!(
++            compose_antigravity_model_arg(Some("Gemini 3.5 Flash"), Some("low")).as_deref(),
++            Some("Gemini 3.5 Flash (Low)")
++        );
++        assert_eq!(
++            compose_antigravity_model_arg(Some("Gemini 3.5 Flash (Medium)"), Some("high"))
++                .as_deref(),
++            Some("Gemini 3.5 Flash (High)")
++        );
++    }
++
++    #[test]
++    fn parses_full_model_for_preset_options() {
++        let (model_id, reasoning_id) =
++            preset_model_and_reasoning(Some("Claude Sonnet 4.6 (Thinking)"), None);
++
++        assert_eq!(model_id.as_deref(), Some("Claude Sonnet 4.6"));
++        assert_eq!(reasoning_id.as_deref(), Some("thinking"));
++    }
+ }
+diff --git a/shared/schemas/anti_gravity.json b/shared/schemas/anti_gravity.json
+index 8db48845a..76eb6970f 100644
+--- a/shared/schemas/anti_gravity.json
++++ b/shared/schemas/anti_gravity.json
+@@ -19,6 +19,14 @@
+         "null"
+       ]
+     },
++    "effort": {
++      "title": "Effort",
++      "description": "Model effort variant from `agy models`, combined with the base model name for `agy --model`.",
++      "type": [
++        "string",
++        "null"
++      ]
++    },
+     "dangerously_skip_permissions": {
+       "title": "Dangerously Skip Permissions",
+       "description": "Pass `--dangerously-skip-permissions` to AntiGravity CLI.",
+diff --git a/shared/types.ts b/shared/types.ts
+index 55b51ef4d..01dccb4f3 100644
+--- a/shared/types.ts
++++ b/shared/types.ts
+@@ -659,7 +659,7 @@ export type QwenCode = { append_prompt: AppendPrompt, model?: string | null, age
+ 
+ export type KimiCode = { append_prompt: AppendPrompt, model?: string | null, yolo?: boolean | null, context_window?: number | null, mcp_config_file?: string | null, mcp_config?: string | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
+ 
+-export type AntiGravity = { append_prompt: AppendPrompt, model?: string | null, dangerously_skip_permissions?: boolean | null, sandbox?: boolean | null, print_timeout?: string | null, add_dir?: Array<string> | null, context_window?: number | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
++export type AntiGravity = { append_prompt: AppendPrompt, model?: string | null, effort?: string | null, dangerously_skip_permissions?: boolean | null, sandbox?: boolean | null, print_timeout?: string | null, add_dir?: Array<string> | null, context_window?: number | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
+ 
+ export type Droid = { append_prompt: AppendPrompt, autonomy: Autonomy, model?: string | null, reasoning_effort?: DroidReasoningEffort | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
+ 

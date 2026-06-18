@@ -1,0 +1,119 @@
+From 4e3f2ed78affe2a637ca47040b9025d54a7c78b3 Mon Sep 17 00:00:00 2001
+From: Riajul Islam <riajul@kahf.co>
+Date: Wed, 22 Apr 2026 04:35:02 +0000
+Subject: [PATCH] fix: hide cloud shutdown banner
+
+---
+ .../src/app/layout/RemoteAppShell.tsx         | 12 ------------
+ .../ui-new/containers/SharedAppLayout.tsx     | 19 +------------------
+ 2 files changed, 1 insertion(+), 30 deletions(-)
+
+diff --git a/packages/remote-web/src/app/layout/RemoteAppShell.tsx b/packages/remote-web/src/app/layout/RemoteAppShell.tsx
+index 91abafc55..eaf273d54 100644
+--- a/packages/remote-web/src/app/layout/RemoteAppShell.tsx
++++ b/packages/remote-web/src/app/layout/RemoteAppShell.tsx
+@@ -35,7 +35,6 @@ import {
+   CreateRemoteProjectDialog,
+   type CreateRemoteProjectResult,
+ } from "@/shared/dialogs/org/CreateRemoteProjectDialog";
+-import { CloudShutdownExportBanner } from "@/shared/components/CloudShutdownExportBanner";
+ 
+ interface RemoteAppShellProps {
+   children: ReactNode;
+@@ -58,9 +57,6 @@ export function RemoteAppShell({ children }: RemoteAppShellProps) {
+   const { isSignedIn } = useAuth();
+   const isWorkspaceContextRoute = location.pathname.includes("/workspaces");
+   const isProjectRoute = /^\/projects\/[^/]+/.test(location.pathname);
+-  const isExportRoute = location.pathname === "/export";
+-  const showCloudShutdownBanner =
+-    isExportRoute || (isSignedIn && isProjectRoute);
+ 
+   useCommandBarShortcut(
+     () => CommandBarDialog.show(),
+@@ -179,10 +175,6 @@ export function RemoteAppShell({ children }: RemoteAppShellProps) {
+     [navigate],
+   );
+ 
+-  const handleExportClick = useCallback(() => {
+-    navigate({ to: "/export" });
+-  }, [navigate]);
+-
+   const handleCreateProject = useCallback(async () => {
+     if (!activeOrganizationId) {
+       return;
+@@ -250,10 +242,6 @@ export function RemoteAppShell({ children }: RemoteAppShellProps) {
+           : "h-screen",
+       )}
+     >
+-      {showCloudShutdownBanner && (
+-        <CloudShutdownExportBanner onClick={handleExportClick} />
+-      )}
+-
+       <div className="flex min-h-0 flex-1">
+         {!isMobile && (
+           <AppBar
+diff --git a/packages/web-core/src/shared/components/ui-new/containers/SharedAppLayout.tsx b/packages/web-core/src/shared/components/ui-new/containers/SharedAppLayout.tsx
+index f64a228fa..7eb17034f 100644
+--- a/packages/web-core/src/shared/components/ui-new/containers/SharedAppLayout.tsx
++++ b/packages/web-core/src/shared/components/ui-new/containers/SharedAppLayout.tsx
+@@ -31,7 +31,6 @@ import { useCurrentAppDestination } from '@/shared/hooks/useCurrentAppDestinatio
+ import {
+   getDestinationHostId,
+   getProjectDestination,
+-  isProjectDestination,
+   isLocalWorkspacesDestination,
+ } from '@/shared/lib/routes/appNavigation';
+ import {
+@@ -54,7 +53,6 @@ import { AppBarNotificationBellContainer } from '@/pages/workspaces/AppBarNotifi
+ import { WorkspacesSidebarContainer } from '@/pages/workspaces/WorkspacesSidebarContainer';
+ import { WorkspacesSidebarReopenTag } from '@vibe/ui/components/WorkspacesSidebar';
+ import { useRemoteCloudHostsAppBarModel } from '@/shared/hooks/useRemoteCloudHosts';
+-import { CloudShutdownExportBanner } from '@/shared/components/CloudShutdownExportBanner';
+ 
+ export function SharedAppLayout() {
+   const appNavigation = useAppNavigation();
+@@ -173,8 +171,6 @@ export function SharedAppLayout() {
+   );
+   const isWorkspacesActive = isLocalWorkspacesDestination(currentDestination);
+   const isExportActive = currentDestination?.kind === 'export';
+-  const showCloudShutdownBanner =
+-    isExportActive || (isSignedIn && isProjectDestination(currentDestination));
+   const isWorkspaceSidebarPreviewEnabled =
+     !isMobile && isWorkspacesActive && !isLeftSidebarVisible;
+   const activeProjectId = projectDestination?.projectId ?? null;
+@@ -303,21 +299,11 @@ export function SharedAppLayout() {
+           'bg-primary',
+           isMobile
+             ? 'flex fixed inset-0 pb-[env(safe-area-inset-bottom)]'
+-            : cn(
+-                'grid grid-cols-[auto_1fr] h-screen',
+-                showCloudShutdownBanner
+-                  ? 'grid-rows-[auto_auto_1fr]'
+-                  : 'grid-rows-[auto_1fr]'
+-              )
++            : 'grid grid-cols-[auto_1fr] grid-rows-[auto_1fr] h-screen'
+         )}
+       >
+         {!isMobile && (
+           <>
+-            {showCloudShutdownBanner && (
+-              <div className="col-span-2">
+-                <CloudShutdownExportBanner onClick={handleExportClick} />
+-              </div>
+-            )}
+             {/* Desktop corner spacer. */}
+             <div
+               data-tauri-drag-region
+@@ -405,9 +391,6 @@ export function SharedAppLayout() {
+ 
+         {isMobile && (
+           <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
+-            {showCloudShutdownBanner && (
+-              <CloudShutdownExportBanner onClick={handleExportClick} />
+-            )}
+             <NavbarContainer
+               mobileMode={isMobile}
+               onOrgSelect={setSelectedOrgId}
+-- 
+2.50.1
+

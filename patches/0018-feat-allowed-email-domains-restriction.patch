@@ -1,0 +1,123 @@
+diff --git a/crates/remote/src/app.rs b/crates/remote/src/app.rs
+index 5c31e57e2..c571547f3 100644
+--- a/crates/remote/src/app.rs
++++ b/crates/remote/src/app.rs
+@@ -87,11 +87,19 @@ impl Server {
+ 
+         let registry = Arc::new(registry);
+ 
++        if !auth_config.allowed_email_domains().is_empty() {
++            tracing::info!(
++                domains = ?auth_config.allowed_email_domains(),
++                "OAuth email domain restriction enabled"
++            );
++        }
++
+         let handoff_service = Arc::new(OAuthHandoffService::new(
+             pool.clone(),
+             registry.clone(),
+             jwt.clone(),
+             auth_config.public_base_url().to_string(),
++            auth_config.allowed_email_domains().to_vec(),
+         ));
+ 
+         let oauth_token_validator = Arc::new(OAuthTokenValidator::new(
+diff --git a/crates/remote/src/auth/handoff.rs b/crates/remote/src/auth/handoff.rs
+index 51cc0a5f2..a5c8374ce 100644
+--- a/crates/remote/src/auth/handoff.rs
++++ b/crates/remote/src/auth/handoff.rs
+@@ -103,6 +103,7 @@ pub struct OAuthHandoffService {
+     providers: Arc<ProviderRegistry>,
+     jwt: Arc<JwtService>,
+     public_origin: String,
++    allowed_email_domains: Vec<String>,
+ }
+ 
+ impl OAuthHandoffService {
+@@ -111,6 +112,7 @@ impl OAuthHandoffService {
+         providers: Arc<ProviderRegistry>,
+         jwt: Arc<JwtService>,
+         public_origin: String,
++        allowed_email_domains: Vec<String>,
+     ) -> Self {
+         let trimmed_origin = public_origin.trim_end_matches('/').to_string();
+         Self {
+@@ -118,6 +120,7 @@ impl OAuthHandoffService {
+             providers,
+             jwt,
+             public_origin: trimmed_origin,
++            allowed_email_domains,
+         }
+     }
+ 
+@@ -285,6 +288,26 @@ impl OAuthHandoffService {
+ 
+         let user_profile = self.fetch_user_with_retries(&provider, &grant).await?;
+ 
++        // Enforce allowed email domains if configured
++        if !self.allowed_email_domains.is_empty() {
++            let email = user_profile.email.as_deref().unwrap_or("");
++            let domain = email.rsplit_once('@').map(|(_, d)| d.to_lowercase());
++            let allowed = domain
++                .as_ref()
++                .map(|d| self.allowed_email_domains.iter().any(|ad| ad.eq_ignore_ascii_case(d)))
++                .unwrap_or(false);
++            if !allowed {
++                let allowed_list = self.allowed_email_domains.join(", ");
++                repo.set_status(record.id, AuthorizationStatus::Error, Some("email_domain_not_allowed"))
++                    .await?;
++                return Ok(CallbackResult::Error {
++                    handoff_id: Some(record.id),
++                    return_to: Some(record.return_to.clone()),
++                    error: format!("Your email domain is not allowed. Permitted domains: {allowed_list}"),
++                });
++            }
++        }
++
+         let user = self
+             .upsert_identity(&provider, &user_profile, Some(encrypted_tokens.as_str()))
+             .await?;
+diff --git a/crates/remote/src/config.rs b/crates/remote/src/config.rs
+index 4d341c546..f6080e9c0 100644
+--- a/crates/remote/src/config.rs
++++ b/crates/remote/src/config.rs
+@@ -394,6 +394,7 @@ pub struct AuthConfig {
+     local: Option<LocalAuthConfig>,
+     jwt_secret: SecretString,
+     public_base_url: String,
++    allowed_email_domains: Vec<String>,
+ }
+ 
+ impl AuthConfig {
+@@ -452,6 +453,12 @@ impl AuthConfig {
+         let public_base_url =
+             env::var("SERVER_PUBLIC_BASE_URL").unwrap_or_else(|_| "http://localhost:8081".into());
+ 
++        let allowed_email_domains: Vec<String> = env::var("ALLOWED_EMAIL_DOMAINS")
++            .ok()
++            .filter(|v| !v.is_empty())
++            .map(|v| v.split(',').map(|d| d.trim().to_lowercase()).filter(|d| !d.is_empty()).collect())
++            .unwrap_or_default();
++
+         Ok(Self {
+             github,
+             google,
+@@ -459,6 +466,7 @@ impl AuthConfig {
+             local,
+             jwt_secret,
+             public_base_url,
++            allowed_email_domains,
+         })
+     }
+ 
+@@ -478,6 +486,10 @@ impl AuthConfig {
+         self.local.as_ref()
+     }
+ 
++    pub fn allowed_email_domains(&self) -> &[String] {
++        &self.allowed_email_domains
++    }
++
+     pub fn jwt_secret(&self) -> &SecretString {
+         &self.jwt_secret
+     }

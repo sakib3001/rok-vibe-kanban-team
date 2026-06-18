@@ -1,0 +1,923 @@
+From f4393cc7a35fda4d4a1edd9dab485ea65eddb378 Mon Sep 17 00:00:00 2001
+From: Riajul Islam <riajul@kahf.co>
+Date: Wed, 15 Apr 2026 09:57:44 +0000
+Subject: [PATCH] feat: add GitLab merge request integration via glab CLI
+
+---
+ crates/git-host/src/detection.rs              |  57 ++-
+ crates/git-host/src/gitlab/cli.rs             | 439 ++++++++++++++++++
+ crates/git-host/src/gitlab/mod.rs             | 268 +++++++++++
+ crates/git-host/src/lib.rs                    |   5 +-
+ crates/git-host/src/types.rs                  |   2 +
+ .../dialogs/command-bar/CreatePRDialog.tsx    |   4 +-
+ shared/types.ts                               |   2 +-
+ 7 files changed, 772 insertions(+), 5 deletions(-)
+ create mode 100644 crates/git-host/src/gitlab/cli.rs
+ create mode 100644 crates/git-host/src/gitlab/mod.rs
+
+diff --git a/crates/git-host/src/detection.rs b/crates/git-host/src/detection.rs
+index 2228fa588..8a52f6921 100644
+--- a/crates/git-host/src/detection.rs
++++ b/crates/git-host/src/detection.rs
+@@ -33,6 +33,11 @@ pub(crate) fn detect_provider_from_url(url: &str) -> ProviderKind {
+         return ProviderKind::GitHub;
+     }
+ 
++    // GitLab.com or self-hosted GitLab (e.g., gitlab.company.com)
++    if url_lower.contains("gitlab.") || url_lower.contains("gitlab.com") {
++        return ProviderKind::GitLab;
++    }
++
+     ProviderKind::Unknown
+ }
+ 
+@@ -42,6 +47,7 @@ pub(crate) fn detect_provider_from_url(url: &str) -> ProviderKind {
+ /// - GitHub: `https://github.com/owner/repo/pull/123`
+ /// - GitHub Enterprise: `https://github.company.com/owner/repo/pull/123`
+ /// - Azure DevOps: `https://dev.azure.com/org/project/_git/repo/pullrequest/123`
++/// - GitLab: `https://gitlab.com/owner/repo/-/merge_requests/123`
+ #[cfg(test)]
+ fn detect_provider_from_pr_url(pr_url: &str) -> ProviderKind {
+     let url_lower = pr_url.to_lowercase();
+@@ -59,6 +65,11 @@ fn detect_provider_from_pr_url(pr_url: &str) -> ProviderKind {
+         return ProviderKind::AzureDevOps;
+     }
+ 
++    // GitLab pattern: contains /-/merge_requests/ in the path
++    if url_lower.contains("/-/merge_requests/") {
++        return ProviderKind::GitLab;
++    }
++
+     // Fall back to general URL detection
+     detect_provider_from_url(pr_url)
+ }
+@@ -137,11 +148,39 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn test_unknown_provider() {
++    fn test_gitlab_com() {
+         assert_eq!(
+             detect_provider_from_url("https://gitlab.com/owner/repo"),
+-            ProviderKind::Unknown
++            ProviderKind::GitLab
++        );
++        assert_eq!(
++            detect_provider_from_url("https://gitlab.com/owner/repo.git"),
++            ProviderKind::GitLab
++        );
++        assert_eq!(
++            detect_provider_from_url("git@gitlab.com:owner/repo.git"),
++            ProviderKind::GitLab
++        );
++    }
++
++    #[test]
++    fn test_gitlab_self_hosted() {
++        assert_eq!(
++            detect_provider_from_url("https://gitlab.company.com/owner/repo"),
++            ProviderKind::GitLab
++        );
++        assert_eq!(
++            detect_provider_from_url("https://gitlab.example.com/team/project"),
++            ProviderKind::GitLab
++        );
++        assert_eq!(
++            detect_provider_from_url("git@gitlab.internal.io:org/repo.git"),
++            ProviderKind::GitLab
+         );
++    }
++
++    #[test]
++    fn test_unknown_provider() {
+         assert_eq!(
+             detect_provider_from_url("https://bitbucket.org/owner/repo"),
+             ProviderKind::Unknown
+@@ -160,6 +199,20 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn test_pr_url_gitlab() {
++        assert_eq!(
++            detect_provider_from_pr_url("https://gitlab.com/owner/repo/-/merge_requests/123"),
++            ProviderKind::GitLab
++        );
++        assert_eq!(
++            detect_provider_from_pr_url(
++                "https://gitlab.example.com/team/project/-/merge_requests/456"
++            ),
++            ProviderKind::GitLab
++        );
++    }
++
+     #[test]
+     fn test_pr_url_azure() {
+         assert_eq!(
+diff --git a/crates/git-host/src/gitlab/cli.rs b/crates/git-host/src/gitlab/cli.rs
+new file mode 100644
+index 000000000..90ccf66b4
+--- /dev/null
++++ b/crates/git-host/src/gitlab/cli.rs
+@@ -0,0 +1,439 @@
++//! Minimal helpers around the GitLab CLI (`glab`).
++//!
++//! This module provides low-level access to the GitLab CLI for merge request
++//! operations, mirroring the structure of the GitHub CLI wrapper.
++
++use std::{
++    ffi::{OsStr, OsString},
++    path::Path,
++    process::Command,
++};
++
++use chrono::{DateTime, Utc};
++use db::models::merge::MergeStatus;
++use serde::Deserialize;
++use thiserror::Error;
++use utils::shell::resolve_executable_path_blocking;
++
++use crate::types::{CreatePrRequest, PullRequestDetail, UnifiedPrComment};
++
++#[derive(Debug, Error)]
++pub enum GlabCliError {
++    #[error("GitLab CLI (`glab`) executable not found or not runnable")]
++    NotAvailable,
++    #[error("GitLab CLI command failed: {0}")]
++    CommandFailed(String),
++    #[error("GitLab CLI authentication failed: {0}")]
++    AuthFailed(String),
++    #[error("GitLab CLI returned unexpected output: {0}")]
++    UnexpectedOutput(String),
++}
++
++#[derive(Debug, Clone, Default)]
++pub struct GlabCli;
++
++/// JSON response from `glab mr view --output json`.
++#[derive(Deserialize)]
++struct GlabMrResponse {
++    iid: i64,
++    web_url: String,
++    state: String,
++    merged_at: Option<DateTime<Utc>>,
++    merge_commit_sha: Option<String>,
++    source_branch: Option<String>,
++    target_branch: Option<String>,
++    title: Option<String>,
++}
++
++/// JSON response from `glab mr list --output json`.
++#[derive(Deserialize)]
++struct GlabMrListItem {
++    iid: i64,
++    web_url: String,
++    state: String,
++    merged_at: Option<DateTime<Utc>>,
++    merge_commit_sha: Option<String>,
++    source_branch: Option<String>,
++    target_branch: Option<String>,
++    title: Option<String>,
++}
++
++/// JSON response item for MR notes from `glab api`.
++#[derive(Deserialize)]
++struct GlabNoteResponse {
++    id: i64,
++    body: String,
++    author: GlabNoteAuthor,
++    created_at: Option<DateTime<Utc>>,
++    system: Option<bool>,
++    #[serde(rename = "type")]
++    note_type: Option<String>,
++    position: Option<GlabNotePosition>,
++}
++
++#[derive(Deserialize)]
++struct GlabNoteAuthor {
++    username: String,
++}
++
++#[derive(Deserialize)]
++struct GlabNotePosition {
++    new_path: Option<String>,
++    new_line: Option<i64>,
++    old_path: Option<String>,
++}
++
++impl GlabCli {
++    pub fn new() -> Self {
++        Self {}
++    }
++
++    fn ensure_available(&self) -> Result<(), GlabCliError> {
++        resolve_executable_path_blocking("glab").ok_or(GlabCliError::NotAvailable)?;
++        Ok(())
++    }
++
++    fn run<I, S>(&self, args: I, dir: Option<&Path>) -> Result<String, GlabCliError>
++    where
++        I: IntoIterator<Item = S>,
++        S: AsRef<OsStr>,
++    {
++        self.ensure_available()?;
++        let glab = resolve_executable_path_blocking("glab").ok_or(GlabCliError::NotAvailable)?;
++        let mut cmd = Command::new(&glab);
++        if let Some(d) = dir {
++            cmd.current_dir(d);
++        }
++        for arg in args {
++            cmd.arg(arg);
++        }
++
++        tracing::debug!("Running GitLab CLI command: {:?} {:?}", glab, cmd.get_args());
++
++        let output = cmd
++            .output()
++            .map_err(|err| GlabCliError::CommandFailed(err.to_string()))?;
++
++        if output.status.success() {
++            return Ok(String::from_utf8_lossy(&output.stdout).to_string());
++        }
++
++        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
++
++        let lower = stderr.to_ascii_lowercase();
++        if lower.contains("auth")
++            || lower.contains("unauthorized")
++            || lower.contains("401")
++            || lower.contains("glab auth login")
++            || lower.contains("token")
++        {
++            return Err(GlabCliError::AuthFailed(stderr));
++        }
++
++        Err(GlabCliError::CommandFailed(stderr))
++    }
++
++    /// Create a merge request using `glab mr create`.
++    pub fn create_mr(
++        &self,
++        request: &CreatePrRequest,
++        repo_path: &Path,
++    ) -> Result<PullRequestDetail, GlabCliError> {
++        let body = request.body.as_deref().unwrap_or("");
++
++        let mut args: Vec<OsString> = Vec::with_capacity(14);
++        args.push(OsString::from("mr"));
++        args.push(OsString::from("create"));
++        args.push(OsString::from("--source-branch"));
++        args.push(OsString::from(&request.head_branch));
++        args.push(OsString::from("--target-branch"));
++        args.push(OsString::from(&request.base_branch));
++        args.push(OsString::from("--title"));
++        args.push(OsString::from(&request.title));
++        args.push(OsString::from("--description"));
++        args.push(OsString::from(body));
++        args.push(OsString::from("--no-editor"));
++        args.push(OsString::from("--yes"));
++
++        if request.draft.unwrap_or(false) {
++            args.push(OsString::from("--draft"));
++        }
++
++        let raw = self.run(args, Some(repo_path))?;
++        Self::parse_mr_create_text(&raw, &request.title, &request.head_branch, &request.base_branch)
++    }
++
++    /// View a merge request by its URL using `glab mr view`.
++    pub fn view_mr(
++        &self,
++        mr_id: &str,
++        repo_path: &Path,
++    ) -> Result<PullRequestDetail, GlabCliError> {
++        let raw = self.run(
++            ["mr", "view", mr_id, "--output", "json"],
++            Some(repo_path),
++        )?;
++        Self::parse_mr_view(&raw)
++    }
++
++    /// List merge requests for a branch using `glab mr list`.
++    pub fn list_mrs_for_branch(
++        &self,
++        branch: &str,
++        repo_path: &Path,
++    ) -> Result<Vec<PullRequestDetail>, GlabCliError> {
++        let raw = self.run(
++            [
++                "mr",
++                "list",
++                "--source-branch",
++                branch,
++                "--all",
++                "--output",
++                "json",
++            ],
++            Some(repo_path),
++        )?;
++        Self::parse_mr_list(&raw)
++    }
++
++    /// List open merge requests using `glab mr list`.
++    pub fn list_open_mrs(
++        &self,
++        repo_path: &Path,
++    ) -> Result<Vec<PullRequestDetail>, GlabCliError> {
++        let raw = self.run(
++            ["mr", "list", "--output", "json"],
++            Some(repo_path),
++        )?;
++        Self::parse_open_mr_list(&raw)
++    }
++
++    /// Fetch MR notes (comments) via `glab api`.
++    pub fn get_mr_notes(
++        &self,
++        mr_number: i64,
++        repo_path: &Path,
++    ) -> Result<Vec<UnifiedPrComment>, GlabCliError> {
++        let raw = self.run(
++            [
++                "api",
++                &format!("projects/:id/merge_requests/{}/notes?sort=asc&per_page=100", mr_number),
++            ],
++            Some(repo_path),
++        )?;
++        Self::parse_mr_notes(&raw)
++    }
++}
++
++// Parsing helpers
++impl GlabCli {
++    /// Parse `glab mr create` text output to extract the MR URL.
++    /// glab outputs a line like: `https://gitlab.com/owner/repo/-/merge_requests/123`
++    fn parse_mr_create_text(
++        raw: &str,
++        title: &str,
++        head_branch: &str,
++        base_branch: &str,
++    ) -> Result<PullRequestDetail, GlabCliError> {
++        let mr_url = raw
++            .lines()
++            .rev()
++            .flat_map(|line| line.split_whitespace())
++            .map(|token| token.trim_matches(|c: char| c == '<' || c == '>'))
++            .find(|token| token.starts_with("http") && token.contains("merge_requests"))
++            .ok_or_else(|| {
++                GlabCliError::UnexpectedOutput(format!(
++                    "glab mr create did not return a merge request URL; raw output: {raw}"
++                ))
++            })?
++            .trim_end_matches(['.', ',', ';'])
++            .to_string();
++
++        let number = mr_url
++            .rsplit('/')
++            .next()
++            .ok_or_else(|| {
++                GlabCliError::UnexpectedOutput(format!(
++                    "Failed to extract MR number from URL '{mr_url}'"
++                ))
++            })?
++            .trim_end_matches(|c: char| !c.is_ascii_digit())
++            .parse::<i64>()
++            .map_err(|err| {
++                GlabCliError::UnexpectedOutput(format!(
++                    "Failed to parse MR number from URL '{mr_url}': {err}"
++                ))
++            })?;
++
++        Ok(PullRequestDetail {
++            number,
++            url: mr_url,
++            status: MergeStatus::Open,
++            merged_at: None,
++            merge_commit_sha: None,
++            title: title.to_string(),
++            head_branch: head_branch.to_string(),
++            base_branch: base_branch.to_string(),
++        })
++    }
++
++    fn parse_mr_view(raw: &str) -> Result<PullRequestDetail, GlabCliError> {
++        let mr: GlabMrResponse = serde_json::from_str(raw.trim()).map_err(|err| {
++            GlabCliError::UnexpectedOutput(format!(
++                "Failed to parse glab mr view response: {err}; raw: {raw}"
++            ))
++        })?;
++        Ok(Self::mr_response_to_info(
++            mr.iid,
++            &mr.web_url,
++            &mr.state,
++            mr.merged_at,
++            mr.merge_commit_sha,
++            mr.title,
++            mr.source_branch,
++            mr.target_branch,
++        ))
++    }
++
++    fn parse_mr_list(raw: &str) -> Result<Vec<PullRequestDetail>, GlabCliError> {
++        let mrs: Vec<GlabMrListItem> = serde_json::from_str(raw.trim()).map_err(|err| {
++            GlabCliError::UnexpectedOutput(format!(
++                "Failed to parse glab mr list response: {err}; raw: {raw}"
++            ))
++        })?;
++        Ok(mrs
++            .into_iter()
++            .map(|mr| {
++                Self::mr_response_to_info(
++                    mr.iid,
++                    &mr.web_url,
++                    &mr.state,
++                    mr.merged_at,
++                    mr.merge_commit_sha,
++                    mr.title,
++                    mr.source_branch,
++                    mr.target_branch,
++                )
++            })
++            .collect())
++    }
++
++    fn parse_open_mr_list(raw: &str) -> Result<Vec<PullRequestDetail>, GlabCliError> {
++        let mrs: Vec<GlabMrListItem> = serde_json::from_str(raw.trim()).map_err(|err| {
++            GlabCliError::UnexpectedOutput(format!(
++                "Failed to parse glab mr list response: {err}; raw: {raw}"
++            ))
++        })?;
++        Ok(mrs
++            .into_iter()
++            .map(|mr| {
++                Self::mr_response_to_info(
++                    mr.iid,
++                    &mr.web_url,
++                    &mr.state,
++                    mr.merged_at,
++                    mr.merge_commit_sha,
++                    mr.title,
++                    mr.source_branch,
++                    mr.target_branch,
++                )
++            })
++            .collect())
++    }
++
++    fn mr_response_to_info(
++        iid: i64,
++        web_url: &str,
++        state: &str,
++        merged_at: Option<DateTime<Utc>>,
++        merge_commit_sha: Option<String>,
++        title: Option<String>,
++        head_branch: Option<String>,
++        base_branch: Option<String>,
++    ) -> PullRequestDetail {
++        PullRequestDetail {
++            number: iid,
++            url: web_url.to_string(),
++            status: Self::map_gitlab_state(state),
++            merged_at,
++            merge_commit_sha,
++            title: title.unwrap_or_default(),
++            head_branch: head_branch.unwrap_or_default(),
++            base_branch: base_branch.unwrap_or_default(),
++        }
++    }
++
++    fn map_gitlab_state(state: &str) -> MergeStatus {
++        match state.to_lowercase().as_str() {
++            "opened" => MergeStatus::Open,
++            "merged" => MergeStatus::Merged,
++            "closed" => MergeStatus::Closed,
++            _ => MergeStatus::Unknown,
++        }
++    }
++
++    fn parse_mr_notes(raw: &str) -> Result<Vec<UnifiedPrComment>, GlabCliError> {
++        let notes: Vec<GlabNoteResponse> = serde_json::from_str(raw.trim()).map_err(|err| {
++            GlabCliError::UnexpectedOutput(format!(
++                "Failed to parse MR notes response: {err}; raw: {raw}"
++            ))
++        })?;
++
++        let mut comments = Vec::new();
++        for note in notes {
++            // Skip system-generated notes (e.g., "assigned to", "changed the description")
++            if note.system.unwrap_or(false) {
++                continue;
++            }
++
++            let created_at = note.created_at.unwrap_or_else(Utc::now);
++
++            if let Some(pos) = note.position {
++                // This is a diff/review comment
++                let path = pos
++                    .new_path
++                    .or(pos.old_path)
++                    .unwrap_or_else(|| String::new());
++                comments.push(UnifiedPrComment::Review {
++                    id: note.id,
++                    author: note.author.username,
++                    author_association: None,
++                    body: note.body,
++                    created_at,
++                    url: None,
++                    path,
++                    line: pos.new_line,
++                    side: None,
++                    diff_hunk: None,
++                });
++            } else if note.note_type.as_deref() == Some("DiffNote") {
++                // DiffNote without position data — treat as review comment
++                comments.push(UnifiedPrComment::Review {
++                    id: note.id,
++                    author: note.author.username,
++                    author_association: None,
++                    body: note.body,
++                    created_at,
++                    url: None,
++                    path: String::new(),
++                    line: None,
++                    side: None,
++                    diff_hunk: None,
++                });
++            } else {
++                // General comment
++                comments.push(UnifiedPrComment::General {
++                    id: note.id.to_string(),
++                    author: note.author.username,
++                    author_association: None,
++                    body: note.body,
++                    created_at,
++                    url: None,
++                });
++            }
++        }
++
++        Ok(comments)
++    }
++}
+diff --git a/crates/git-host/src/gitlab/mod.rs b/crates/git-host/src/gitlab/mod.rs
+new file mode 100644
+index 000000000..2b8644cec
+--- /dev/null
++++ b/crates/git-host/src/gitlab/mod.rs
+@@ -0,0 +1,268 @@
++//! GitLab hosting service implementation.
++
++mod cli;
++
++use std::{path::Path, time::Duration};
++
++use async_trait::async_trait;
++use backon::{ExponentialBuilder, Retryable};
++pub use cli::GlabCli;
++use cli::GlabCliError;
++use tokio::task;
++use tracing::info;
++
++use crate::{
++    GitHostProvider,
++    types::{CreatePrRequest, GitHostError, PullRequestDetail, ProviderKind, UnifiedPrComment},
++};
++
++#[derive(Debug, Clone)]
++pub struct GitLabProvider {
++    glab_cli: GlabCli,
++}
++
++impl GitLabProvider {
++    pub fn new() -> Result<Self, GitHostError> {
++        Ok(Self {
++            glab_cli: GlabCli::new(),
++        })
++    }
++}
++
++impl From<GlabCliError> for GitHostError {
++    fn from(error: GlabCliError) -> Self {
++        match &error {
++            GlabCliError::AuthFailed(msg) => GitHostError::AuthFailed(msg.clone()),
++            GlabCliError::NotAvailable => GitHostError::CliNotInstalled {
++                provider: ProviderKind::GitLab,
++            },
++            GlabCliError::CommandFailed(msg) => {
++                let lower = msg.to_ascii_lowercase();
++                if lower.contains("403") || lower.contains("forbidden") {
++                    GitHostError::InsufficientPermissions(msg.clone())
++                } else if lower.contains("404") || lower.contains("not found") {
++                    GitHostError::RepoNotFoundOrNoAccess(msg.clone())
++                } else if lower.contains("not a git repository") {
++                    GitHostError::NotAGitRepository(msg.clone())
++                } else {
++                    GitHostError::PullRequest(msg.clone())
++                }
++            }
++            GlabCliError::UnexpectedOutput(msg) => GitHostError::UnexpectedOutput(msg.clone()),
++        }
++    }
++}
++
++#[async_trait]
++impl GitHostProvider for GitLabProvider {
++    async fn create_pr(
++        &self,
++        repo_path: &Path,
++        _remote_url: &str,
++        request: &CreatePrRequest,
++    ) -> Result<PullRequestDetail, GitHostError> {
++        if let Some(head_url) = &request.head_repo_url
++            && head_url != _remote_url
++        {
++            return Err(GitHostError::PullRequest(
++                "Cross-fork merge requests are not supported for GitLab via CLI".to_string(),
++            ));
++        }
++
++        let head_branch = request.head_branch.clone();
++
++        (|| async {
++            let cli = self.glab_cli.clone();
++            let request = request.clone();
++            let repo_path = repo_path.to_path_buf();
++
++            let cli_result =
++                task::spawn_blocking(move || cli.create_mr(&request, &repo_path))
++                    .await
++                    .map_err(|err| {
++                        GitHostError::PullRequest(format!(
++                            "Failed to execute GitLab CLI for MR creation: {err}"
++                        ))
++                    })?
++                    .map_err(GitHostError::from)?;
++
++            info!(
++                "Created GitLab MR !{} for branch {}",
++                cli_result.number, head_branch
++            );
++
++            Ok(cli_result)
++        })
++        .retry(
++            &ExponentialBuilder::default()
++                .with_min_delay(Duration::from_secs(1))
++                .with_max_delay(Duration::from_secs(30))
++                .with_max_times(3)
++                .with_jitter(),
++        )
++        .when(|e: &GitHostError| e.should_retry())
++        .notify(|err: &GitHostError, dur: Duration| {
++            tracing::warn!(
++                "GitLab API call failed, retrying after {:.2}s: {}",
++                dur.as_secs_f64(),
++                err
++            );
++        })
++        .await
++    }
++
++    async fn get_pr_status(&self, pr_url: &str) -> Result<PullRequestDetail, GitHostError> {
++        // We pass the full MR URL to glab mr view so it can resolve the MR directly.
++        (|| async {
++            let cli = self.glab_cli.clone();
++            let url = pr_url.to_string();
++
++            // glab mr view can accept the MR URL directly
++            let pr = task::spawn_blocking(move || {
++                // Try with a temp path — glab uses the repo from the URL context
++                // We need to find a valid repo path. Since we don't have one here,
++                // we'll use the current directory and pass the URL as the ID.
++                cli.view_mr(&url, Path::new("."))
++            })
++            .await
++            .map_err(|err| {
++                GitHostError::PullRequest(format!(
++                    "Failed to execute GitLab CLI for viewing MR: {err}"
++                ))
++            })?;
++            pr.map_err(GitHostError::from)
++        })
++        .retry(
++            &ExponentialBuilder::default()
++                .with_min_delay(Duration::from_secs(1))
++                .with_max_delay(Duration::from_secs(30))
++                .with_max_times(3)
++                .with_jitter(),
++        )
++        .when(|err: &GitHostError| err.should_retry())
++        .notify(|err: &GitHostError, dur: Duration| {
++            tracing::warn!(
++                "GitLab API call failed, retrying after {:.2}s: {}",
++                dur.as_secs_f64(),
++                err
++            );
++        })
++        .await
++    }
++
++    async fn list_prs_for_branch(
++        &self,
++        repo_path: &Path,
++        _remote_url: &str,
++        branch_name: &str,
++    ) -> Result<Vec<PullRequestDetail>, GitHostError> {
++        (|| async {
++            let cli = self.glab_cli.clone();
++            let branch = branch_name.to_string();
++            let repo_path = repo_path.to_path_buf();
++
++            let prs = task::spawn_blocking(move || cli.list_mrs_for_branch(&branch, &repo_path))
++                .await
++                .map_err(|err| {
++                    GitHostError::PullRequest(format!(
++                        "Failed to execute GitLab CLI for listing MRs: {err}"
++                    ))
++                })?;
++            prs.map_err(GitHostError::from)
++        })
++        .retry(
++            &ExponentialBuilder::default()
++                .with_min_delay(Duration::from_secs(1))
++                .with_max_delay(Duration::from_secs(30))
++                .with_max_times(3)
++                .with_jitter(),
++        )
++        .when(|e: &GitHostError| e.should_retry())
++        .notify(|err: &GitHostError, dur: Duration| {
++            tracing::warn!(
++                "GitLab API call failed, retrying after {:.2}s: {}",
++                dur.as_secs_f64(),
++                err
++            );
++        })
++        .await
++    }
++
++    async fn get_pr_comments(
++        &self,
++        repo_path: &Path,
++        _remote_url: &str,
++        pr_number: i64,
++    ) -> Result<Vec<UnifiedPrComment>, GitHostError> {
++        (|| async {
++            let cli = self.glab_cli.clone();
++            let repo_path = repo_path.to_path_buf();
++
++            let comments =
++                task::spawn_blocking(move || cli.get_mr_notes(pr_number, &repo_path))
++                    .await
++                    .map_err(|err| {
++                        GitHostError::PullRequest(format!(
++                            "Failed to execute GitLab CLI for fetching MR comments: {err}"
++                        ))
++                    })?;
++            comments.map_err(GitHostError::from)
++        })
++        .retry(
++            &ExponentialBuilder::default()
++                .with_min_delay(Duration::from_secs(1))
++                .with_max_delay(Duration::from_secs(30))
++                .with_max_times(3)
++                .with_jitter(),
++        )
++        .when(|e: &GitHostError| e.should_retry())
++        .notify(|err: &GitHostError, dur: Duration| {
++            tracing::warn!(
++                "GitLab API call failed, retrying after {:.2}s: {}",
++                dur.as_secs_f64(),
++                err
++            );
++        })
++        .await
++    }
++
++    async fn list_open_prs(
++        &self,
++        repo_path: &Path,
++        _remote_url: &str,
++    ) -> Result<Vec<PullRequestDetail>, GitHostError> {
++        (|| async {
++            let cli = self.glab_cli.clone();
++            let repo_path = repo_path.to_path_buf();
++
++            let prs = task::spawn_blocking(move || cli.list_open_mrs(&repo_path))
++                .await
++                .map_err(|err| {
++                    GitHostError::PullRequest(format!(
++                        "Failed to execute GitLab CLI for listing open MRs: {err}"
++                    ))
++                })?;
++            prs.map_err(GitHostError::from)
++        })
++        .retry(
++            &ExponentialBuilder::default()
++                .with_min_delay(Duration::from_secs(1))
++                .with_max_delay(Duration::from_secs(30))
++                .with_max_times(3)
++                .with_jitter(),
++        )
++        .when(|e: &GitHostError| e.should_retry())
++        .notify(|err: &GitHostError, dur: Duration| {
++            tracing::warn!(
++                "GitLab API call failed, retrying after {:.2}s: {}",
++                dur.as_secs_f64(),
++                err
++            );
++        })
++        .await
++    }
++
++    fn provider_kind(&self) -> ProviderKind {
++        ProviderKind::GitLab
++    }
++}
+diff --git a/crates/git-host/src/lib.rs b/crates/git-host/src/lib.rs
+index a7029784c..0a453e6d5 100644
+--- a/crates/git-host/src/lib.rs
++++ b/crates/git-host/src/lib.rs
+@@ -3,6 +3,7 @@ mod types;
+ 
+ pub mod azure;
+ pub mod github;
++pub mod gitlab;
+ 
+ use std::path::Path;
+ 
+@@ -14,7 +15,7 @@ pub use types::{
+     PullRequestDetail, ReviewCommentUser, UnifiedPrComment,
+ };
+ 
+-use self::{azure::AzureDevOpsProvider, github::GitHubProvider};
++use self::{azure::AzureDevOpsProvider, github::GitHubProvider, gitlab::GitLabProvider};
+ 
+ #[async_trait]
+ #[enum_dispatch(GitHostService)]
+@@ -55,6 +56,7 @@ pub trait GitHostProvider: Send + Sync {
+ pub enum GitHostService {
+     GitHub(GitHubProvider),
+     AzureDevOps(AzureDevOpsProvider),
++    GitLab(GitLabProvider),
+ }
+ 
+ impl GitHostService {
+@@ -62,6 +64,7 @@ impl GitHostService {
+         match detect_provider_from_url(url) {
+             ProviderKind::GitHub => Ok(Self::GitHub(GitHubProvider::new()?)),
+             ProviderKind::AzureDevOps => Ok(Self::AzureDevOps(AzureDevOpsProvider::new()?)),
++            ProviderKind::GitLab => Ok(Self::GitLab(GitLabProvider::new()?)),
+             ProviderKind::Unknown => Err(GitHostError::UnsupportedProvider),
+         }
+     }
+diff --git a/crates/git-host/src/types.rs b/crates/git-host/src/types.rs
+index 97cf461b9..655a7e2ba 100644
+--- a/crates/git-host/src/types.rs
++++ b/crates/git-host/src/types.rs
+@@ -9,6 +9,7 @@ use ts_rs::TS;
+ pub enum ProviderKind {
+     GitHub,
+     AzureDevOps,
++    GitLab,
+     Unknown,
+ }
+ 
+@@ -17,6 +18,7 @@ impl std::fmt::Display for ProviderKind {
+         match self {
+             ProviderKind::GitHub => write!(f, "GitHub"),
+             ProviderKind::AzureDevOps => write!(f, "Azure DevOps"),
++            ProviderKind::GitLab => write!(f, "GitLab"),
+             ProviderKind::Unknown => write!(f, "Unknown"),
+         }
+     }
+diff --git a/packages/web-core/src/shared/dialogs/command-bar/CreatePRDialog.tsx b/packages/web-core/src/shared/dialogs/command-bar/CreatePRDialog.tsx
+index fcf9fd8c9..4128145dd 100644
+--- a/packages/web-core/src/shared/dialogs/command-bar/CreatePRDialog.tsx
++++ b/packages/web-core/src/shared/dialogs/command-bar/CreatePRDialog.tsx
+@@ -248,7 +248,9 @@ const CreatePRDialogImpl = create<CreatePRDialogProps>(
+                 ? 'GitHub'
+                 : result.error.provider === 'azure_dev_ops'
+                   ? 'Azure DevOps'
+-                  : 'Git host';
++                  : result.error.provider === 'git_lab'
++                    ? 'GitLab'
++                    : 'Git host';
+             const action =
+               result.error.type === 'cli_not_installed'
+                 ? 'not installed'
+diff --git a/shared/types.ts b/shared/types.ts
+index f812cb4e5..840a45235 100644
+--- a/shared/types.ts
++++ b/shared/types.ts
+@@ -404,7 +404,7 @@ export type CreateAndStartWorkspaceResponse = { workspace: Workspace, execution_
+ 
+ export type UnifiedPrComment = { "comment_type": "general", id: string, author: string, author_association: string | null, body: string, created_at: string, url: string | null, } | { "comment_type": "review", id: bigint, author: string, author_association: string | null, body: string, created_at: string, url: string | null, path: string, line: bigint | null, side: string | null, diff_hunk: string | null, };
+ 
+-export type ProviderKind = "git_hub" | "azure_dev_ops" | "unknown";
++export type ProviderKind = "git_hub" | "azure_dev_ops" | "git_lab" | "unknown";
+ 
+ export type PullRequestDetail = { number: bigint, url: string, status: MergeStatus, merged_at: string | null, merge_commit_sha: string | null, title: string, base_branch: string, head_branch: string, };
+ 
+-- 
+2.50.1
+

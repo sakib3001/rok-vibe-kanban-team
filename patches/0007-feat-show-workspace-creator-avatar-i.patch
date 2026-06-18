@@ -1,0 +1,214 @@
+From 528f7d6f27ba7d223e3ef50c0107d2be2bbc476f Mon Sep 17 00:00:00 2001
+From: Riajul Islam <riajul@kahf.co>
+Date: Tue, 14 Apr 2026 06:27:05 +0000
+Subject: [PATCH] downstream:
+ 0007-feat-show-workspace-creator-avatar-in-sidebar
+
+---
+ .../ui/src/components/WorkspaceSummary.tsx    | 11 ++++-
+ .../ui/src/components/WorkspacesSidebar.tsx   |  5 ++
+ .../workspaces/WorkspacesSidebarContainer.tsx | 49 +++++++++++++++++--
+ 3 files changed, 58 insertions(+), 7 deletions(-)
+
+diff --git a/packages/ui/src/components/WorkspaceSummary.tsx b/packages/ui/src/components/WorkspaceSummary.tsx
+index 9ec0e2c0c..ce8923b55 100644
+--- a/packages/ui/src/components/WorkspaceSummary.tsx
++++ b/packages/ui/src/components/WorkspaceSummary.tsx
+@@ -11,6 +11,7 @@ import {
+ import { useTranslation } from 'react-i18next';
+ import { cn } from '../lib/cn';
+ import { RunningDots } from './RunningDots';
++import { UserAvatar, type UserAvatarUser } from './UserAvatar';
+ 
+ const formatRelativeElapsed = (dateString: string): string => {
+   const date = new Date(dateString);
+@@ -42,6 +43,8 @@ export interface WorkspaceSummaryProps {
+   latestProcessCompletedAt?: string;
+   latestProcessStatus?: 'running' | 'completed' | 'failed' | 'killed';
+   prStatus?: 'open' | 'merged' | 'closed' | 'unknown';
++  /** Owner profile for displaying creator avatar (shown when viewing other users' workspaces) */
++  owner?: UserAvatarUser | null;
+   onClick?: () => void;
+   className?: string;
+   summary?: boolean;
+@@ -64,6 +67,7 @@ export function WorkspaceSummary({
+   hasUnseenActivity = false,
+   latestProcessCompletedAt,
+   latestProcessStatus,
++  owner,
+   prStatus,
+   onClick,
+   className,
+@@ -108,7 +112,7 @@ export function WorkspaceSummary({
+       >
+         <div
+           className={cn(
+-            'overflow-hidden whitespace-nowrap pr-double',
++            'flex items-center gap-half overflow-hidden whitespace-nowrap pr-double',
+             !summary && 'text-normal'
+           )}
+           style={{
+@@ -118,7 +122,10 @@ export function WorkspaceSummary({
+               'linear-gradient(to right, black calc(100% - 24px), transparent 100%)',
+           }}
+         >
+-          {name}
++          {owner && (
++            <UserAvatar user={owner} className="!size-4 !text-[8px]" />
++          )}
++          <span className="truncate">{name}</span>
+         </div>
+         {(!summary || isActive) && (
+           <div className="flex w-full items-center gap-base text-sm h-5">
+diff --git a/packages/ui/src/components/WorkspacesSidebar.tsx b/packages/ui/src/components/WorkspacesSidebar.tsx
+index 469d95c42..0bae73fa9 100644
+--- a/packages/ui/src/components/WorkspacesSidebar.tsx
++++ b/packages/ui/src/components/WorkspacesSidebar.tsx
+@@ -12,6 +12,7 @@ import { cn } from '../lib/cn';
+ import { InputField } from './InputField';
+ import { WorkspaceSummary } from './WorkspaceSummary';
+ import type { AppBarHostStatus } from './AppBar';
++import type { UserAvatarUser } from './UserAvatar';
+ import {
+   CollapsibleSectionHeader,
+   type SectionAction,
+@@ -33,6 +34,7 @@ export interface WorkspacesSidebarWorkspace {
+   latestProcessCompletedAt?: string;
+   latestProcessStatus?: 'running' | 'completed' | 'failed' | 'killed';
+   prStatus?: 'open' | 'merged' | 'closed' | 'unknown';
++  owner?: UserAvatarUser | null;
+ }
+ 
+ export interface WorkspacesSidebarPersistKeys {
+@@ -158,6 +160,7 @@ function WorkspaceList({
+           latestProcessCompletedAt={workspace.latestProcessCompletedAt}
+           latestProcessStatus={workspace.latestProcessStatus}
+           prStatus={workspace.prStatus}
++          owner={workspace.owner}
+           onOpenWorkspaceActions={onOpenWorkspaceActions}
+           onClick={() => onSelectWorkspace(workspace.id)}
+         />
+@@ -351,6 +354,7 @@ export function WorkspacesSidebar({
+                   latestProcessCompletedAt={workspace.latestProcessCompletedAt}
+                   latestProcessStatus={workspace.latestProcessStatus}
+                   prStatus={workspace.prStatus}
++                  owner={workspace.owner}
+                   onOpenWorkspaceActions={handleOpenWorkspaceActions}
+                   onClick={() => onSelectWorkspace(workspace.id)}
+                 />
+@@ -468,6 +472,7 @@ export function WorkspacesSidebar({
+                 latestProcessCompletedAt={workspace.latestProcessCompletedAt}
+                 latestProcessStatus={workspace.latestProcessStatus}
+                 prStatus={workspace.prStatus}
++                owner={workspace.owner}
+                 onOpenWorkspaceActions={handleOpenWorkspaceActions}
+                 onClick={() => onSelectWorkspace(workspace.id)}
+               />
+diff --git a/packages/web-core/src/pages/workspaces/WorkspacesSidebarContainer.tsx b/packages/web-core/src/pages/workspaces/WorkspacesSidebarContainer.tsx
+index 7452708ec..d27b413be 100644
+--- a/packages/web-core/src/pages/workspaces/WorkspacesSidebarContainer.tsx
++++ b/packages/web-core/src/pages/workspaces/WorkspacesSidebarContainer.tsx
+@@ -7,6 +7,7 @@ import { useScratch } from '@/shared/hooks/useScratch';
+ import { useAllOrganizationProjects } from '@/shared/hooks/useAllOrganizationProjects';
+ import { useUserOrganizations } from '@/shared/hooks/useUserOrganizations';
+ import { useOrganizationSelection } from '@/shared/hooks/useOrganizationSelection';
++import { useOrganizationMembers } from '@/shared/hooks/useOrganizationMembers';
+ import { useAuth } from '@/shared/hooks/auth/useAuth';
+ import {
+   MemberRole as MemberRoleEnum,
+@@ -261,12 +262,19 @@ function getWorkspaceSortTimestamp(
+ 
+ function formatCreatorLabel(
+   ownerUserId: string,
+-  currentUserId: string | null
++  currentUserId: string | null,
++  member?: { first_name: string | null; last_name: string | null; username: string | null } | null
+ ): string {
+   if (currentUserId && ownerUserId === currentUserId) {
+     return 'Mine';
+   }
+ 
++  if (member) {
++    const name = [member.first_name, member.last_name].filter(Boolean).join(' ');
++    if (name) return name;
++    if (member.username) return member.username;
++  }
++
+   if (ownerUserId.length <= 12) {
+     return ownerUserId;
+   }
+@@ -341,6 +349,14 @@ export function WorkspacesSidebarContainer({
+   const { data: orgsData } = useUserOrganizations();
+   const { selectedOrg } = useOrganizationSelection({ organizations: orgsData });
+   const isCurrentUserAdmin = selectedOrg?.user_role === MemberRoleEnum.ADMIN;
++  const { data: orgMembers } = useOrganizationMembers(selectedOrg?.id);
++  const membersById = useMemo(() => {
++    const map = new Map<string, { first_name: string | null; last_name: string | null; username: string | null; avatar_url: string | null }>();
++    for (const m of orgMembers ?? []) {
++      map.set(m.user_id, m);
++    }
++    return map;
++  }, [orgMembers]);
+   const organizations = useMemo(
+     () => orgsData?.organizations ?? [],
+     [orgsData?.organizations]
+@@ -388,12 +404,12 @@ export function WorkspacesSidebarContainer({
+       }
+       options.push({
+         value: ownerUserId,
+-        label: formatCreatorLabel(ownerUserId, currentUserId),
++        label: formatCreatorLabel(ownerUserId, currentUserId, membersById.get(ownerUserId)),
+       });
+     }
+ 
+     return options;
+-  }, [ownerByLocalId, currentUserId]);
++  }, [ownerByLocalId, currentUserId, membersById]);
+ 
+   // Build org name lookup
+   const orgNameById = useMemo(() => {
+@@ -651,6 +667,29 @@ export function WorkspacesSidebarContainer({
+     [sortedArchivedWorkspaces, displayLimit, isSearching]
+   );
+ 
++  // Attach owner profile to workspaces when not in "Mine" mode
++  const showOwnerAvatars = effectiveCreatorFilter !== CREATOR_FILTER_MINE;
++  const withOwner = useCallback(
++    (ws: Workspace) => {
++      if (!showOwnerAvatars) return ws;
++      const ownerId = ownerByLocalId.get(ws.id);
++      if (!ownerId || ownerId === currentUserId) return ws;
++      const member = membersById.get(ownerId);
++      return member ? { ...ws, owner: member } : ws;
++    },
++    [showOwnerAvatars, ownerByLocalId, currentUserId, membersById]
++  );
++
++  const sidebarActiveWorkspaces = useMemo(
++    () => paginatedActiveWorkspaces.map(withOwner),
++    [paginatedActiveWorkspaces, withOwner]
++  );
++
++  const sidebarArchivedWorkspaces = useMemo(
++    () => paginatedArchivedWorkspaces.map(withOwner),
++    [paginatedArchivedWorkspaces, withOwner]
++  );
++
+   // Check if there are more workspaces to load
+   const hasMoreWorkspaces = showArchive
+     ? sortedArchivedWorkspaces.length > displayLimit
+@@ -803,9 +842,9 @@ export function WorkspacesSidebarContainer({
+ 
+   return (
+     <WorkspacesSidebar
+-      workspaces={paginatedActiveWorkspaces}
++      workspaces={sidebarActiveWorkspaces}
+       totalWorkspacesCount={activeWorkspaces.length}
+-      archivedWorkspaces={paginatedArchivedWorkspaces}
++      archivedWorkspaces={sidebarArchivedWorkspaces}
+       isLoading={isWorkspacesListLoading}
+       selectedWorkspaceId={selectedWorkspaceId ?? null}
+       onSelectWorkspace={handleSelectWorkspace}
+-- 
+2.50.1
+

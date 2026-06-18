@@ -1,0 +1,96 @@
+From 6e88d05061d78b85121c3fc920570d8e7becf404 Mon Sep 17 00:00:00 2001
+From: Riajul Islam <riajul@kahf.co>
+Date: Tue, 21 Apr 2026 15:11:38 +0000
+Subject: [PATCH] fix: scope org selection persistence per authenticated user
+
+---
+ .../shared/hooks/useOrganizationSelection.ts  | 13 ++++++++++-
+ .../src/shared/stores/useOrganizationStore.ts | 22 ++++++++++++++++++-
+ 2 files changed, 33 insertions(+), 2 deletions(-)
+
+diff --git a/packages/web-core/src/shared/hooks/useOrganizationSelection.ts b/packages/web-core/src/shared/hooks/useOrganizationSelection.ts
+index 9e0b5274f..eaed39adb 100644
+--- a/packages/web-core/src/shared/hooks/useOrganizationSelection.ts
++++ b/packages/web-core/src/shared/hooks/useOrganizationSelection.ts
+@@ -3,7 +3,11 @@ import type {
+   OrganizationWithRole,
+   ListOrganizationsResponse,
+ } from 'shared/types';
+-import { useOrganizationStore } from '@/shared/stores/useOrganizationStore';
++import { useAuth } from '@/shared/hooks/auth/useAuth';
++import {
++  hydrateOrganizationSelectionForUser,
++  useOrganizationStore,
++} from '@/shared/stores/useOrganizationStore';
+ 
+ interface UseOrganizationSelectionOptions {
+   organizations: ListOrganizationsResponse | undefined;
+@@ -13,6 +17,7 @@ interface UseOrganizationSelectionOptions {
+ export function useOrganizationSelection(
+   options: UseOrganizationSelectionOptions
+ ) {
++  const { isLoaded, userId } = useAuth();
+   const { organizations, onSelectionChange } = options;
+   const selectedOrgId = useOrganizationStore((s) => s.selectedOrgId);
+   const setSelectedOrgId = useOrganizationStore((s) => s.setSelectedOrgId);
+@@ -22,6 +27,12 @@ export function useOrganizationSelection(
+     [organizations]
+   );
+ 
++  // Scope persisted selection by signed-in user to avoid cross-user leakage.
++  useEffect(() => {
++    if (!isLoaded) return;
++    hydrateOrganizationSelectionForUser(userId);
++  }, [isLoaded, userId]);
++
+   // Default to first available organization if none selected or selection is invalid
+   useEffect(() => {
+     if (orgList.length === 0) return;
+diff --git a/packages/web-core/src/shared/stores/useOrganizationStore.ts b/packages/web-core/src/shared/stores/useOrganizationStore.ts
+index 893a242de..f537a96ea 100644
+--- a/packages/web-core/src/shared/stores/useOrganizationStore.ts
++++ b/packages/web-core/src/shared/stores/useOrganizationStore.ts
+@@ -8,6 +8,11 @@ type State = {
+   clearSelectedOrgId: () => void;
+ };
+ 
++const ORGANIZATION_SELECTION_KEY_PREFIX = 'organization-selection';
++const SIGNED_OUT_SCOPE = 'signed-out';
++
++let activePersistKey: string | null = null;
++
+ export const useOrganizationStore = create<State>()(
+   persist(
+     (set) => ({
+@@ -16,12 +21,27 @@ export const useOrganizationStore = create<State>()(
+       clearSelectedOrgId: () => set({ selectedOrgId: null }),
+     }),
+     {
+-      name: 'organization-selection',
++      name: ORGANIZATION_SELECTION_KEY_PREFIX,
+       partialize: (state) => ({ selectedOrgId: state.selectedOrgId }),
++      skipHydration: true,
+     }
+   )
+ );
+ 
++export function hydrateOrganizationSelectionForUser(userId: string | null) {
++  const userScope = userId ?? SIGNED_OUT_SCOPE;
++  const nextPersistKey = `${ORGANIZATION_SELECTION_KEY_PREFIX}:${userScope}`;
++
++  if (activePersistKey === nextPersistKey) {
++    return;
++  }
++
++  activePersistKey = nextPersistKey;
++  useOrganizationStore.persist.setOptions({ name: nextPersistKey });
++  useOrganizationStore.setState({ selectedOrgId: null });
++  void useOrganizationStore.persist.rehydrate();
++}
++
+ // Sync org store changes into the UI preferences store for server persistence
+ useOrganizationStore.subscribe((state) => {
+   useUiPreferencesStore.getState().setSelectedOrgId(state.selectedOrgId);
+-- 
+2.50.1
+

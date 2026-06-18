@@ -1,0 +1,519 @@
+From 5f2ac27c53c39a3ed2a4d80366b0f5145e490b47 Mon Sep 17 00:00:00 2001
+From: Riajul Islam <riajul@kahf.co>
+Date: Tue, 14 Apr 2026 06:27:04 +0000
+Subject: [PATCH] downstream: 0004-feat-unified-code-server-editor-flow
+
+---
+ .../src/services/config/editor/mod.rs         | 159 +++++++++++++++++-
+ .../features/onboarding/ui/LandingPage.tsx    |  38 ++++-
+ .../src/i18n/locales/en/settings.json         |   5 +-
+ packages/web-core/src/shared/actions/index.ts |   9 +-
+ .../src/shared/components/IdeIcon.tsx         |   6 +-
+ .../settings/GeneralSettingsSection.tsx       |  22 ++-
+ .../src/shared/hooks/useOpenInEditor.ts       |   4 +
+ .../web-core/src/shared/lib/editorWarnings.ts |  20 +++
+ packages/web-core/src/shared/lib/ideName.ts   |   2 +
+ shared/types.ts                               |   2 +-
+ 10 files changed, 248 insertions(+), 19 deletions(-)
+ create mode 100644 packages/web-core/src/shared/lib/editorWarnings.ts
+
+diff --git a/crates/services/src/services/config/editor/mod.rs b/crates/services/src/services/config/editor/mod.rs
+index faa1d9360..404800b1e 100644
+--- a/crates/services/src/services/config/editor/mod.rs
++++ b/crates/services/src/services/config/editor/mod.rs
+@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
+ use strum_macros::{EnumIter, EnumString};
+ use thiserror::Error;
+ use ts_rs::TS;
++use url::Url;
+ 
+ fn default_auto_install_extension() -> bool {
+     true
+@@ -57,6 +58,7 @@ pub enum EditorType {
+     Zed,
+     Xcode,
+     GoogleAntigravity,
++    CodeServer,
+     Custom,
+ }
+ 
+@@ -100,6 +102,7 @@ impl EditorConfig {
+             EditorType::Zed => "zed",
+             EditorType::Xcode => "xed",
+             EditorType::GoogleAntigravity => "antigravity",
++            EditorType::CodeServer => "code-server",
+             EditorType::Custom => {
+                 // Custom editor - use user-provided command or fallback to VSCode
+                 self.custom_command.as_deref().unwrap_or("code")
+@@ -137,6 +140,9 @@ impl EditorConfig {
+     /// Check if the editor is available on the system.
+     /// Uses the same command resolution logic as spawn_local().
+     pub async fn check_availability(&self) -> bool {
++        if matches!(self.editor_type, EditorType::CodeServer) {
++            return self.code_server_url_base().is_ok();
++        }
+         self.resolve_command().await.is_ok()
+     }
+ 
+@@ -144,7 +150,10 @@ impl EditorConfig {
+         self.auto_install_extension
+             && matches!(
+                 self.editor_type,
+-                EditorType::VsCode | EditorType::VsCodeInsiders | EditorType::Cursor
++                EditorType::VsCode
++                    | EditorType::VsCodeInsiders
++                    | EditorType::Cursor
++                    | EditorType::CodeServer
+             )
+     }
+ 
+@@ -165,6 +174,14 @@ impl EditorConfig {
+         if let Some(url) = self.remote_url(path) {
+             return Ok(Some(url));
+         }
++
++        if matches!(self.editor_type, EditorType::CodeServer) {
++            if self.should_auto_install_extension() {
++                self.try_install_extension().await;
++            }
++            let url = self.code_server_url(path)?;
++            return Ok(Some(url));
++        }
+         if self.should_auto_install_extension() {
+             self.try_install_extension().await;
+         }
+@@ -172,6 +189,57 @@ impl EditorConfig {
+         Ok(None)
+     }
+ 
++    fn code_server_url_base(&self) -> Result<Url, EditorOpenError> {
++        if !matches!(self.editor_type, EditorType::CodeServer) {
++            return Err(EditorOpenError::InvalidCommand {
++                details: "Code Server URL is only valid for CODE_SERVER editor type".to_string(),
++                editor_type: self.editor_type.clone(),
++            });
++        }
++
++        let command = self
++            .custom_command
++            .as_deref()
++            .map(str::trim)
++            .ok_or_else(|| EditorOpenError::InvalidCommand {
++                details: "Code Server URL is required".to_string(),
++                editor_type: self.editor_type.clone(),
++            })?;
++
++        if command.is_empty() {
++            return Err(EditorOpenError::InvalidCommand {
++                details: "Code Server URL is required".to_string(),
++                editor_type: self.editor_type.clone(),
++            });
++        }
++
++        let url = Url::parse(command).map_err(|e| EditorOpenError::InvalidCommand {
++            details: format!("Invalid Code Server URL: {e}"),
++            editor_type: self.editor_type.clone(),
++        })?;
++
++        match url.scheme() {
++            "http" | "https" => Ok(url),
++            _ => Err(EditorOpenError::InvalidCommand {
++                details: "Code Server URL must start with http:// or https://".to_string(),
++                editor_type: self.editor_type.clone(),
++            }),
++        }
++    }
++
++    fn code_server_url(&self, path: &Path) -> Result<String, EditorOpenError> {
++        let mut url = self.code_server_url_base()?;
++        let folder_path = if path.is_file() {
++            path.parent().unwrap_or(path)
++        } else {
++            path
++        };
++
++        url.query_pairs_mut()
++            .append_pair("folder", &folder_path.to_string_lossy());
++        Ok(url.to_string())
++    }
++
+     fn remote_url(&self, path: &Path) -> Option<String> {
+         let remote_host = self.remote_ssh_host.as_ref()?;
+         let user_part = self
+@@ -232,3 +300,92 @@ impl EditorConfig {
+         }
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use std::fs;
++
++    use tempfile::tempdir;
++    use url::Url;
++
++    use super::{EditorConfig, EditorOpenError, EditorType};
++
++    #[test]
++    fn code_server_url_requires_http_or_https_scheme() {
++        let config = EditorConfig::new(
++            EditorType::CodeServer,
++            Some("code-server://workspace".to_string()),
++            None,
++            None,
++            false,
++        );
++
++        let result = config.code_server_url_base();
++        assert!(matches!(
++            result,
++            Err(EditorOpenError::InvalidCommand { .. })
++        ));
++    }
++
++    #[test]
++    fn code_server_url_is_required() {
++        let config = EditorConfig::new(EditorType::CodeServer, None, None, None, false);
++
++        let result = config.code_server_url_base();
++        assert!(matches!(
++            result,
++            Err(EditorOpenError::InvalidCommand { .. })
++        ));
++    }
++
++    #[test]
++    fn code_server_url_for_directory_sets_folder_query() {
++        let dir = tempdir().expect("tempdir");
++        let repo_path = dir.path().join("repo");
++        fs::create_dir_all(&repo_path).expect("create repo dir");
++
++        let config = EditorConfig::new(
++            EditorType::CodeServer,
++            Some("https://code-server.example.com/".to_string()),
++            None,
++            None,
++            false,
++        );
++
++        let url = config.code_server_url(&repo_path).expect("code server url");
++        let parsed = Url::parse(&url).expect("valid url");
++        let folder = parsed
++            .query_pairs()
++            .find_map(|(k, v)| (k == "folder").then(|| v.to_string()))
++            .expect("folder query exists");
++
++        assert_eq!(folder, repo_path.to_string_lossy());
++    }
++
++    #[test]
++    fn code_server_url_for_file_uses_parent_directory() {
++        let dir = tempdir().expect("tempdir");
++        let repo_path = dir.path().join("repo");
++        fs::create_dir_all(&repo_path).expect("create repo dir");
++        let file_path = repo_path.join("src/main.rs");
++        fs::create_dir_all(file_path.parent().expect("parent path")).expect("create file parent");
++        fs::write(&file_path, "fn main() {}\n").expect("write file");
++
++        let config = EditorConfig::new(
++            EditorType::CodeServer,
++            Some("https://code-server.example.com/?theme=dark".to_string()),
++            None,
++            None,
++            false,
++        );
++
++        let url = config.code_server_url(&file_path).expect("code server url");
++        let parsed = Url::parse(&url).expect("valid url");
++        let folder = parsed
++            .query_pairs()
++            .find_map(|(k, v)| (k == "folder").then(|| v.to_string()))
++            .expect("folder query exists");
++
++        assert_eq!(folder, repo_path.join("src").to_string_lossy());
++    }
++}
+diff --git a/packages/web-core/src/features/onboarding/ui/LandingPage.tsx b/packages/web-core/src/features/onboarding/ui/LandingPage.tsx
+index 7e2677955..7cc60d5c7 100644
+--- a/packages/web-core/src/features/onboarding/ui/LandingPage.tsx
++++ b/packages/web-core/src/features/onboarding/ui/LandingPage.tsx
+@@ -252,9 +252,18 @@ export function LandingPage() {
+     void previewSound(value);
+   };
+ 
+-  const isCustomEditorValid =
+-    editorType !== EditorType.CUSTOM || customCommand.trim() !== '';
+-  const canContinue = !saving && isCustomEditorValid;
++  const trimmedEditorCommand = customCommand.trim();
++  const isCustomEditor = editorType === EditorType.CUSTOM;
++  const isCodeServerEditor = editorType === EditorType.CODE_SERVER;
++  const hasEditorCommand = trimmedEditorCommand !== '';
++  const hasValidCodeServerUrl =
++    hasEditorCommand && /^https?:\/\//i.test(trimmedEditorCommand);
++
++  const isEditorCommandValid =
++    (!isCustomEditor && !isCodeServerEditor) ||
++    (isCustomEditor && hasEditorCommand) ||
++    (isCodeServerEditor && hasValidCodeServerUrl);
++  const canContinue = !saving && isEditorCommandValid;
+ 
+   const handleContinue = async () => {
+     if (!config || !canContinue) return;
+@@ -262,7 +271,7 @@ export function LandingPage() {
+     const editorConfig: EditorConfig = {
+       editor_type: editorType,
+       custom_command:
+-        editorType === EditorType.CUSTOM ? customCommand.trim() : null,
++        isCustomEditor || isCodeServerEditor ? trimmedEditorCommand : null,
+       remote_ssh_host: null,
+       remote_ssh_user: null,
+       auto_install_extension: true,
+@@ -274,7 +283,8 @@ export function LandingPage() {
+       selected_agent: selectedAgent,
+       editor_type: editorType,
+       custom_editor_command_set:
+-        editorType === EditorType.CUSTOM && customCommand.trim() !== '',
++        (isCustomEditor || isCodeServerEditor) && hasEditorCommand,
++      code_server_url_set: isCodeServerEditor && hasEditorCommand,
+       sound_enabled: soundEnabled,
+       sound_file: soundEnabled ? soundFile : null,
+     });
+@@ -453,25 +463,35 @@ export function LandingPage() {
+                 })}
+               </div>
+ 
+-              {editorType === EditorType.CUSTOM && (
++              {(isCustomEditor || isCodeServerEditor) && (
+                 <div className="space-y-half">
+                   <label className="text-sm font-medium text-normal">
+-                    Custom Command
++                    {isCodeServerEditor ? 'Code Server URL' : 'Custom Command'}
+                   </label>
+                   <input
+                     type="text"
+                     value={customCommand}
+                     onChange={(e) => setCustomCommand(e.target.value)}
+-                    placeholder="e.g. code --wait"
++                    placeholder={
++                      isCodeServerEditor
++                        ? 'https://code-server.example.com'
++                        : 'e.g. code --wait'
++                    }
+                     className={cn(
+                       'w-full bg-panel border rounded-sm px-base py-half text-sm text-high',
+                       'placeholder:text-low placeholder:opacity-80 focus:outline-none',
+                       'focus:ring-1 focus:ring-brand',
+-                      customCommand.trim() === ''
++                      !hasEditorCommand ||
++                        (isCodeServerEditor && !hasValidCodeServerUrl)
+                         ? 'border-warning/60'
+                         : 'border-border'
+                     )}
+                   />
++                  {isCodeServerEditor && !hasValidCodeServerUrl && (
++                    <p className="text-xs text-warning">
++                      Enter a valid URL starting with http:// or https://
++                    </p>
++                  )}
+                 </div>
+               )}
+             </section>
+diff --git a/packages/web-core/src/i18n/locales/en/settings.json b/packages/web-core/src/i18n/locales/en/settings.json
+index bb5d8958f..954cff769 100644
+--- a/packages/web-core/src/i18n/locales/en/settings.json
++++ b/packages/web-core/src/i18n/locales/en/settings.json
+@@ -91,6 +91,9 @@
+           "placeholder": "e.g., code, subl, vim",
+           "helper": "Enter the command to launch your custom editor. This will be used to open files."
+         },
++        "codeServerUrl": {
++          "placeholder": "https://code-server.example.com"
++        },
+         "remoteSsh": {
+           "host": {
+             "label": "Remote SSH Host (Optional)",
+@@ -105,7 +108,7 @@
+         },
+         "autoInstallExtension": {
+           "label": "Auto-install VS Code Extension",
+-          "helper": "Automatically install the Vibe Kanban extension when opening a project in VS Code or Cursor. This runs in the background and has no effect if the extension is already installed."
++          "helper": "Automatically install the Vibe Kanban extension when opening a project in VS Code, Cursor, or Code Server. This runs in the background and has no effect if the extension is already installed."
+         },
+         "availability": {
+           "checking": "Checking availability...",
+diff --git a/packages/web-core/src/shared/actions/index.ts b/packages/web-core/src/shared/actions/index.ts
+index 4554f4335..c1edff669 100644
+--- a/packages/web-core/src/shared/actions/index.ts
++++ b/packages/web-core/src/shared/actions/index.ts
+@@ -67,6 +67,7 @@ import { RenameWorkspaceDialog } from '@vibe/ui/components/RenameWorkspaceDialog
+ import { ProjectsGuideDialog } from '@vibe/ui/components/ProjectsGuideDialog';
+ import { CreatePRDialog } from '@/shared/dialogs/command-bar/CreatePRDialog';
+ import { getIdeName } from '@/shared/lib/ideName';
++import { alertIfCodeServerNotConfigured } from '@/shared/lib/editorWarnings';
+ import { EditorSelectionDialog } from '@/shared/dialogs/command-bar/EditorSelectionDialog';
+ import { StartReviewDialog } from '@/shared/dialogs/command-bar/StartReviewDialog';
+ import posthog from 'posthog-js';
+@@ -759,7 +760,10 @@ export const Actions = {
+         if (response.url) {
+           window.open(response.url, '_blank');
+         }
+-      } catch {
++      } catch (err) {
++        if (alertIfCodeServerNotConfigured(err)) {
++          return;
++        }
+         // Show editor selection dialog on failure
+         EditorSelectionDialog.show({
+           selectedAttemptId: ctx.currentWorkspaceId,
+@@ -1129,6 +1133,9 @@ export const Actions = {
+           window.open(response.url, '_blank');
+         }
+       } catch (err) {
++        if (alertIfCodeServerNotConfigured(err)) {
++          return;
++        }
+         console.error('Failed to open repo in editor:', err);
+         throw new Error('Failed to open repository in IDE');
+       }
+diff --git a/packages/web-core/src/shared/components/IdeIcon.tsx b/packages/web-core/src/shared/components/IdeIcon.tsx
+index 5cfeb0dc3..167b6390c 100644
+--- a/packages/web-core/src/shared/components/IdeIcon.tsx
++++ b/packages/web-core/src/shared/components/IdeIcon.tsx
+@@ -16,7 +16,11 @@ export function IdeIcon({ editorType, className = 'h-4 w-4' }: IdeIconProps) {
+   const ideName = getIdeName(editorType);
+   let ideIconPath = '';
+ 
+-  if (!editorType || editorType === EditorType.CUSTOM) {
++  if (
++    !editorType ||
++    editorType === EditorType.CUSTOM ||
++    editorType === EditorType.CODE_SERVER
++  ) {
+     // Generic fallback for other IDEs or no IDE configured
+     return <Code2 className={className} />;
+   }
+diff --git a/packages/web-core/src/shared/dialogs/settings/settings/GeneralSettingsSection.tsx b/packages/web-core/src/shared/dialogs/settings/settings/GeneralSettingsSection.tsx
+index 3c5fb6ab6..5fcaef770 100644
+--- a/packages/web-core/src/shared/dialogs/settings/settings/GeneralSettingsSection.tsx
++++ b/packages/web-core/src/shared/dialogs/settings/settings/GeneralSettingsSection.tsx
+@@ -334,10 +334,19 @@ export function GeneralSettingsSection() {
+           />
+         </SettingsField>
+ 
+-        {draft?.editor.editor_type === EditorType.CUSTOM && (
++        {(draft?.editor.editor_type === EditorType.CUSTOM ||
++          draft?.editor.editor_type === EditorType.CODE_SERVER) && (
+           <SettingsField
+-            label={t('settings.general.editor.customCommand.label')}
+-            description={t('settings.general.editor.customCommand.helper')}
++            label={
++              draft?.editor.editor_type === EditorType.CODE_SERVER
++                ? 'Code Server URL'
++                : t('settings.general.editor.customCommand.label')
++            }
++            description={
++              draft?.editor.editor_type === EditorType.CODE_SERVER
++                ? 'Required. Browser URL to your code-server instance. Vibe Kanban will open this URL in a new tab and append the workspace folder path.'
++                : t('settings.general.editor.customCommand.helper')
++            }
+           >
+             <SettingsInput
+               value={draft?.editor.custom_command || ''}
+@@ -350,7 +359,9 @@ export function GeneralSettingsSection() {
+                 })
+               }
+               placeholder={t(
+-                'settings.general.editor.customCommand.placeholder'
++                draft?.editor.editor_type === EditorType.CODE_SERVER
++                  ? 'settings.general.editor.codeServerUrl.placeholder'
++                  : 'settings.general.editor.customCommand.placeholder'
+               )}
+             />
+           </SettingsField>
+@@ -408,7 +419,8 @@ export function GeneralSettingsSection() {
+ 
+         {(draft?.editor.editor_type === EditorType.VS_CODE ||
+           draft?.editor.editor_type === EditorType.VS_CODE_INSIDERS ||
+-          draft?.editor.editor_type === EditorType.CURSOR) && (
++          draft?.editor.editor_type === EditorType.CURSOR ||
++          draft?.editor.editor_type === EditorType.CODE_SERVER) && (
+           <SettingsCheckbox
+             id="auto-install-extension"
+             label={t('settings.general.editor.autoInstallExtension.label')}
+diff --git a/packages/web-core/src/shared/hooks/useOpenInEditor.ts b/packages/web-core/src/shared/hooks/useOpenInEditor.ts
+index db81e7f62..7cad4b1c1 100644
+--- a/packages/web-core/src/shared/hooks/useOpenInEditor.ts
++++ b/packages/web-core/src/shared/hooks/useOpenInEditor.ts
+@@ -1,6 +1,7 @@
+ import { useCallback } from 'react';
+ import { workspacesApi, relayApi } from '@/shared/lib/api';
+ import { EditorSelectionDialog } from '@/shared/dialogs/command-bar/EditorSelectionDialog';
++import { alertIfCodeServerNotConfigured } from '@/shared/lib/editorWarnings';
+ import type { EditorType } from 'shared/types';
+ import { useAppRuntime } from '@/shared/hooks/useAppRuntime';
+ import { useHostId } from '@/shared/providers/HostIdProvider';
+@@ -42,6 +43,9 @@ export function useOpenInEditor(
+           window.open(response.url, '_blank');
+         }
+       } catch (err) {
++        if (alertIfCodeServerNotConfigured(err)) {
++          return;
++        }
+         console.error('Failed to open editor:', err);
+         if (!editorType) {
+           if (onShowEditorDialog) {
+diff --git a/packages/web-core/src/shared/lib/editorWarnings.ts b/packages/web-core/src/shared/lib/editorWarnings.ts
+new file mode 100644
+index 000000000..cf44f42c7
+--- /dev/null
++++ b/packages/web-core/src/shared/lib/editorWarnings.ts
+@@ -0,0 +1,20 @@
++const MISSING_CODE_SERVER_URL_ERROR = 'Code Server URL is required';
++
++export function alertIfCodeServerNotConfigured(error: unknown): boolean {
++  const message =
++    error instanceof Error
++      ? error.message
++      : typeof error === 'string'
++        ? error
++        : '';
++
++  if (!message.includes(MISSING_CODE_SERVER_URL_ERROR)) {
++    return false;
++  }
++
++  // eslint-disable-next-line no-alert
++  window.alert(
++    'Code Server URL is not configured. Please set it in Settings > General > Editor.'
++  );
++  return true;
++}
+diff --git a/packages/web-core/src/shared/lib/ideName.ts b/packages/web-core/src/shared/lib/ideName.ts
+index 8c634a5af..9f49b72de 100644
+--- a/packages/web-core/src/shared/lib/ideName.ts
++++ b/packages/web-core/src/shared/lib/ideName.ts
+@@ -18,6 +18,8 @@ export function getIdeName(editorType: EditorType | undefined | null): string {
+       return 'Zed';
+     case EditorType.XCODE:
+       return 'Xcode';
++    case EditorType.CODE_SERVER:
++      return 'Code Server';
+     case EditorType.CUSTOM:
+       return i18n.t('common:editorNames.custom');
+     case EditorType.GOOGLE_ANTIGRAVITY:
+diff --git a/shared/types.ts b/shared/types.ts
+index ca336e2c2..dfd704c01 100644
+--- a/shared/types.ts
++++ b/shared/types.ts
+@@ -496,7 +496,7 @@ export enum ThemeMode { LIGHT = "LIGHT", DARK = "DARK", SYSTEM = "SYSTEM" }
+ 
+ export type EditorConfig = { editor_type: EditorType, custom_command: string | null, remote_ssh_host: string | null, remote_ssh_user: string | null, auto_install_extension: boolean, };
+ 
+-export enum EditorType { VS_CODE = "VS_CODE", VS_CODE_INSIDERS = "VS_CODE_INSIDERS", CURSOR = "CURSOR", WINDSURF = "WINDSURF", INTELLI_J = "INTELLI_J", ZED = "ZED", XCODE = "XCODE", GOOGLE_ANTIGRAVITY = "GOOGLE_ANTIGRAVITY", CUSTOM = "CUSTOM" }
++export enum EditorType { VS_CODE = "VS_CODE", VS_CODE_INSIDERS = "VS_CODE_INSIDERS", CURSOR = "CURSOR", WINDSURF = "WINDSURF", INTELLI_J = "INTELLI_J", ZED = "ZED", XCODE = "XCODE", GOOGLE_ANTIGRAVITY = "GOOGLE_ANTIGRAVITY", CODE_SERVER = "CODE_SERVER", CUSTOM = "CUSTOM" }
+ 
+ export type EditorOpenError = { "type": "executable_not_found", executable: string, editor_type: EditorType, } | { "type": "invalid_command", details: string, editor_type: EditorType, } | { "type": "launch_failed", executable: string, details: string, editor_type: EditorType, };
+ 
+-- 
+2.50.1
+
