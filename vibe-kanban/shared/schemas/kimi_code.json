@@ -1,0 +1,88 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "append_prompt": {
+      "title": "Append Prompt",
+      "description": "Extra text appended to the prompt",
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "textarea",
+      "default": null
+    },
+    "model": {
+      "title": "Model",
+      "description": "Kimi model ID passed to `kimi --model`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "yolo": {
+      "title": "YOLO",
+      "description": "Pass `--yolo` to Kimi. Print mode already auto-approves tool calls.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "context_window": {
+      "title": "Context Window",
+      "description": "Model context window used for Vibe Kanban's context usage gauge. If unset, Kimi config is read and then 262144 is used as a fallback.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0
+    },
+    "mcp_config_file": {
+      "title": "MCP Config File",
+      "description": "Path passed to `kimi --mcp-config-file`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "mcp_config": {
+      "title": "MCP Config JSON",
+      "description": "Inline JSON passed to `kimi --mcp-config`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "base_command_override": {
+      "title": "Base Command Override",
+      "description": "Override the base command with a custom command",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "additional_params": {
+      "title": "Additional Parameters",
+      "description": "Additional parameters to append to the base command",
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "string"
+      }
+    },
+    "env": {
+      "title": "Environment Variables",
+      "description": "Environment variables to set when running the executor",
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": {
+        "type": "string"
+      }
+    }
+  },
+  "type": "object"
+}
