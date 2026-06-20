@@ -46,15 +46,36 @@ pub(crate) async fn login(
     state: &AppState,
     payload: &LocalLoginRequest,
 ) -> Result<LocalLoginResponse, LocalAuthError> {
-    let Some(local_auth) = state.config().auth.local() else {
-        return Err(LocalAuthError::Disabled);
-    };
+    let normalized_email = payload.email.trim().to_ascii_lowercase();
 
-    let normalized_email = local_auth.email().trim().to_ascii_lowercase();
-    if payload.email.trim().to_ascii_lowercase() != normalized_email
-        || payload.password != local_auth.password().expose_secret()
-    {
-        return Err(LocalAuthError::InvalidCredentials);
+    // The env-configured local account is the bootstrap admin. Everyone else
+    // (members provisioned via invite.sh / members/provision) authenticates via
+    // credential auth. The local developer client only ever calls
+    // /v1/auth/local/login, so fall back to credentials here to let ordinary
+    // team members sign in through it too.
+    let is_admin = matches!(
+        state.config().auth.local(),
+        Some(local_auth)
+            if local_auth.email().trim().to_ascii_lowercase() == normalized_email
+                && payload.password == local_auth.password().expose_secret()
+    );
+
+    if !is_admin {
+        return match crate::auth::credential::login(
+            state,
+            &api_types::CredentialLoginRequest {
+                email: payload.email.clone(),
+                password: payload.password.clone(),
+            },
+        )
+        .await
+        {
+            Ok(resp) => Ok(LocalLoginResponse {
+                access_token: resp.access_token,
+                refresh_token: resp.refresh_token,
+            }),
+            Err(_) => Err(LocalAuthError::InvalidCredentials),
+        };
     }
 
     let user_repo = UserRepository::new(state.pool());
