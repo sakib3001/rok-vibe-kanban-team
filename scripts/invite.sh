@@ -101,10 +101,18 @@ valid_email() { printf '%s' "$1" | grep -qE '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.
 print_creds() { # email password
   echo "✅ Done."
   echo
-  echo "Hand these to the user (they must change the password on first login):"
+  echo "Hand these to the user — this password is final (no forced change):"
   echo "  login:    $BASE"
   echo "  email:    $1"
   echo "  password: $2"
+}
+
+# provision_member always stores the password with must_change=true. The admin-set
+# password is meant to be final, so clear that flag (no forced change / no redirect
+# to the change-password page on first login). Runs psql via docker compose.
+clear_must_change() { # user_id
+  [ -n "$1" ] || return 0
+  psql_exec -q -c "update user_passwords set must_change=false where user_id='$1';" >/dev/null
 }
 
 cmd_create() {
@@ -137,6 +145,7 @@ cmd_create() {
     fi
     exit 1
   fi
+  clear_must_change "$(printf '%s' "$resp" | json_get user_id)"
   echo "✅ Created $email as $role."; echo
   print_creds "$email" "$pw"
 }
@@ -165,6 +174,7 @@ cmd_passwd() {
     -d "$(provision_body "$email" "$(upper "$role")" "" "" "")")
   local pw; pw=$(printf '%s' "$resp" | json_get temporary_password)
   [ -n "$pw" ] || { echo "RE-PROVISION FAILED after removal: $resp" >&2; echo "User $email is now removed — re-run: $0 create $email $role" >&2; exit 1; }
+  clear_must_change "$(printf '%s' "$resp" | json_get user_id)"
   echo "✅ Password reset for $email."; echo
   print_creds "$email" "$pw"
 }
