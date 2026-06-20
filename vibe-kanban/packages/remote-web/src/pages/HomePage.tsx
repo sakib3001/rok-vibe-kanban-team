@@ -366,7 +366,7 @@ function ProjectCard({
     return (
       <button
         type="button"
-        className="group flex h-[61px] w-full flex-col justify-center rounded-sm border border-border bg-primary px-base py-base text-left hover:border-brand/60 hover:bg-panel"
+        className="group flex w-full flex-col justify-center rounded-sm border border-border bg-primary px-base py-base text-left hover:border-brand/60 hover:bg-panel"
         onClick={onRequireHost}
       >
         <p className="text-sm font-medium text-high">{project.name}</p>
@@ -376,19 +376,33 @@ function ProjectCard({
   }
 
   return (
-    <Link
-      to="/projects/$projectId"
-      params={{ projectId: project.id }}
-      onClick={() => {
-        setSelectedOrgId(project.organization_id);
-      }}
-      className="group flex h-[61px] flex-col justify-center rounded-sm border border-border bg-primary px-base py-base hover:border-high/20 hover:bg-panel focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-brand"
-    >
+    <div className="rounded-sm border border-border bg-primary px-base py-base">
       <p className="text-sm font-medium text-high">{project.name}</p>
-      <p className="mt-half text-xs text-low group-hover:text-normal">
-        Open project
-      </p>
-    </Link>
+      <div className="mt-base flex items-center gap-base text-xs">
+        <Link
+          to="/projects/$projectId"
+          params={{ projectId: project.id }}
+          search={{ view: "team" }}
+          onClick={() => {
+            setSelectedOrgId(project.organization_id);
+          }}
+          className="text-low transition-colors hover:text-high"
+        >
+          Open project
+        </Link>
+        <Link
+          to="/projects/$projectId"
+          params={{ projectId: project.id }}
+          search={{ view: "my" }}
+          onClick={() => {
+            setSelectedOrgId(project.organization_id);
+          }}
+          className="text-brand transition-colors hover:text-brand-hover"
+        >
+          My Queue
+        </Link>
+      </div>
+    </div>
   );
 }
 

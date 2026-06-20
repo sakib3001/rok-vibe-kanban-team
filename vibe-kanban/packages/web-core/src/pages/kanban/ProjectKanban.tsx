@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, type ReactNode } from 'react';
+import { useSearch } from '@tanstack/react-router';
 import { useTranslation } from 'react-i18next';
 import { Group, Layout, Panel, Separator } from 'react-resizable-panels';
 import { OrgProvider } from '@/shared/providers/remote/OrgProvider';
@@ -18,6 +19,10 @@ import {
 import { useUserOrganizations } from '@/shared/hooks/useUserOrganizations';
 import { useOrganizationProjects } from '@/shared/hooks/useOrganizationProjects';
 import { useOrganizationStore } from '@/shared/stores/useOrganizationStore';
+import {
+  KANBAN_PROJECT_VIEW_IDS,
+  useUiPreferencesStore,
+} from '@/shared/stores/useUiPreferencesStore';
 import { useAuth } from '@/shared/hooks/auth/useAuth';
 import { useAppNavigation } from '@/shared/hooks/useAppNavigation';
 import { useCurrentKanbanRouteState } from '@/shared/hooks/useCurrentKanbanRouteState';
@@ -257,9 +262,13 @@ function useFindProjectById(projectId: string | undefined) {
 export function ProjectKanban() {
   const { projectId, hostId, hasInvalidWorkspaceCreateDraftId } =
     useCurrentKanbanRouteState();
+  const search = useSearch({ from: '/projects/$projectId' });
   const appNavigation = useAppNavigation();
   const { t } = useTranslation('common');
   const { isSignedIn, isLoaded: authLoaded } = useAuth();
+  const setKanbanProjectView = useUiPreferencesStore(
+    (s) => s.setKanbanProjectView
+  );
   const issueComposerKey = useMemo(() => {
     if (!projectId) {
       return null;
@@ -287,6 +296,18 @@ export function ProjectKanban() {
       });
     }
   }, [projectId, hasInvalidWorkspaceCreateDraftId, appNavigation]);
+
+  // Allow direct links to the personal queue via /projects/:id?view=my.
+  useEffect(() => {
+    if (!projectId) return;
+    if (search.view === 'my') {
+      setKanbanProjectView(projectId, KANBAN_PROJECT_VIEW_IDS.PERSONAL);
+      return;
+    }
+    if (search.view === 'team') {
+      setKanbanProjectView(projectId, KANBAN_PROJECT_VIEW_IDS.TEAM);
+    }
+  }, [projectId, search.view, setKanbanProjectView]);
 
   // Find the project and get its organization
   const { organizationId, isLoading } = useFindProjectById(

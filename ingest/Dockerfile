@@ -5,6 +5,12 @@ WORKDIR /app
 COPY package.json ./
 COPY server.js ./
 
+# Dedup store lives here; create it node-owned so a freshly-created named volume
+# inherits node ownership (Docker seeds new volumes from the image mountpoint).
+# Without this the volume is root-owned and persistDedup() fails with EACCES.
+RUN mkdir -p /data && chown node:node /data
+VOLUME /data
+
 # Drop privileges; the built-in `node` user exists in this image.
 USER node
 
