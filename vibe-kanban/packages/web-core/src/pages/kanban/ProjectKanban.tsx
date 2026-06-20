@@ -262,7 +262,11 @@ function useFindProjectById(projectId: string | undefined) {
 export function ProjectKanban() {
   const { projectId, hostId, hasInvalidWorkspaceCreateDraftId } =
     useCurrentKanbanRouteState();
-  const search = useSearch({ from: '/projects/$projectId' });
+  // ProjectKanban also renders under the flat issue route
+  // (/projects/$projectId_/issues/$issueId), where a hardcoded `from` would
+  // fail tiny-invariant. `strict: false` reads search without asserting a route;
+  // `view` is simply absent (undefined) on routes that don't define it.
+  const search = useSearch({ strict: false }) as { view?: 'team' | 'my' };
   const appNavigation = useAppNavigation();
   const { t } = useTranslation('common');
   const { isSignedIn, isLoaded: authLoaded } = useAuth();
