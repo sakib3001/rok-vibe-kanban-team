@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use super::{
     error::{ErrorResponse, db_error},
-    organization_members::ensure_issue_access,
+    organization_members::{ensure_admin_access, ensure_issue_access},
 };
 use crate::{
     AppState,
@@ -97,6 +97,9 @@ async fn create_issue_assignee(
     Json(payload): Json<CreateIssueAssigneeRequest>,
 ) -> Result<Json<MutationResponse<IssueAssignee>>, ErrorResponse> {
     let organization_id = ensure_issue_access(state.pool(), ctx.user.id, payload.issue_id).await?;
+    // Assignees are admin-controlled: members (incl. the current assignee) must
+    // not be able to set or reassign. Only org admins may change assignments.
+    ensure_admin_access(state.pool(), organization_id, ctx.user.id).await?;
 
     let response = IssueAssigneeRepository::create(
         state.pool(),
@@ -153,6 +156,8 @@ async fn delete_issue_assignee(
         .ok_or_else(|| ErrorResponse::new(StatusCode::NOT_FOUND, "issue assignee not found"))?;
 
     let organization_id = ensure_issue_access(state.pool(), ctx.user.id, assignee.issue_id).await?;
+    // Admin-only: members must not be able to unassign/reassign issues.
+    ensure_admin_access(state.pool(), organization_id, ctx.user.id).await?;
 
     let response = IssueAssigneeRepository::delete(state.pool(), issue_assignee_id)
         .await
