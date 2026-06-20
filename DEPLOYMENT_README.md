@@ -113,13 +113,16 @@ compose **profiles** (so the base stack is unaffected when they're off):
 
 ```bash
 docker compose --profile ingest up -d   # POST /ingest/issues -> auto-create issues
+docker compose --profile memory up -d   # org memory (pgvector + ollama + memory service)
 ```
 
 - **ingest** — issue-ingestion API; see [`ingest/README.md`](./ingest/README.md). Caddy already
   routes `/ingest/*` to it. Requires `INGEST_*` in `.env` + a service account in the team org.
+- **memory** — organization memory sidecar + dedicated pgvector DB + embedder. Caddy routes
+  `/memory/*` to it. Requires `MEMORY_*` + `EMBED_*` config in `.env`.
 
 > ⚠️ **Always repeat the profile flag** for compose ops once a profile is in use, e.g.
-> `docker compose --profile ingest up -d`. A plain `docker compose up -d` won't manage the
+> `docker compose --profile ingest --profile memory up -d`. A plain `docker compose up -d` won't manage the
 > profiled container, and `docker compose down` stops it without bringing it back.
 
 ## Operations
@@ -127,7 +130,7 @@ docker compose --profile ingest up -d   # POST /ingest/issues -> auto-create iss
 | Action | Command |
 |--------|---------|
 | Update images | edit `*_TAG` in `.env` → `docker compose pull && docker compose up -d` |
-| Backup DB | `docker compose exec postgres pg_dump -U remote remote > backup-$(date +%F).sql` |
+| Backup DBs | `./scripts/backup.sh` (backs up `remote`; includes `memory` when `memory-db` is running) |
 | Restore DB | `cat backup.sql \| docker compose exec -T postgres psql -U remote remote` |
 | Logs | `docker compose logs -f <service>` |
 | Stop | `docker compose down` (data persists in volumes) |

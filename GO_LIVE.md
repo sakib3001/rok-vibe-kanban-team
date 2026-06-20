@@ -16,6 +16,7 @@
 | Image pin | pin digest/tag in `.env` before next upgrade |
 | Team org / project | "Rokomari SE Team" / **Amaly** |
 | Ingestion API | **live** — `POST /ingest/issues` (`--profile ingest`); see [ingest/README.md](./ingest/README.md) |
+| Memory layer | optional — `--profile memory` (`/memory/*` MCP/REST + pgvector + ollama) |
 | Client launcher | `@rokomari/vibe-kanban` (in `../rok-vibe-kanban-launcher/`), Node ≥ 20, port 8154 — publish pending |
 
 ---
@@ -83,13 +84,16 @@ docker compose logs -f remote
 ./scripts/backup.sh
 
 # upgrade (after editing IMAGE_TAG in .env)
-# NOTE: include --profile ingest so the ingest sidecar stays managed/running.
-docker compose --profile ingest pull && docker compose --profile ingest up -d
+# NOTE: include all active profiles so sidecars stay managed/running.
+docker compose --profile ingest --profile memory pull && docker compose --profile ingest --profile memory up -d
 ```
 
 > The ingestion API runs under the `ingest` profile. Any `docker compose` command that
 > should keep it running must include `--profile ingest` (a plain `up -d`/`down` ignores
 > or stops it). API key + setup: [ingest/README.md](./ingest/README.md).
+>
+> The memory layer follows the same profile rule (`--profile memory`) and is routed at
+> `/memory/*`. Keep both profile flags whenever both sidecars are enabled.
 
 ---
 
@@ -99,6 +103,8 @@ docker compose --profile ingest pull && docker compose --profile ingest up -d
 - **Harbor images**: set `REMOTE_IMAGE` and pinned `IMAGE_TAG` in `.env`.
 - **Phase 1.5**: publish the `@rokomari/vibe-kanban` wrapper (already built in `../rok-vibe-kanban-launcher/`) to the npm registry.
 - **Phase 4**: dispatch CLI for leads.
+- **Memory profile**: enable org memory retrieval and ingestion with `docker compose --profile memory up -d`,
+  then configure `MEMORY_*` and `EMBED_*` vars in `.env`.
 
 ---
 

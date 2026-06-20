@@ -179,6 +179,7 @@ docker compose up -d
 ├── build.sh                         # patch + build images
 ├── init-db/
 ├── ingest/                          # ingestion sidecar (server.js, Dockerfile, README.md, API.md, test-ingest.sh)
+├── memory/                          # org-memory sidecar (server.js, Dockerfile, migrations, README.md)
 ├── sql/protect-service-account.sql
 ├── scripts/{apply-patches,update-vibe-kanban,publish-npm,invite,backup}.sh
 ├── vibe-kanban/                     # upstream source (submodule @ v0.1.44-20260424091429)
@@ -204,9 +205,13 @@ cd ~/vibe-kanban
 docker compose --profile ingest ps                       # status (always include profiles in use)
 docker compose logs -f remote                             # logs
 ./scripts/backup.sh                                       # pg_dump -> backups/   (also ~/vk-backup-*.sql.gz exist)
+docker compose --profile memory up -d                     # start memory-db + embedder + memory sidecar
+./scripts/memory.sh health                                # quick memory health check (/health + /memory/search)
 ./scripts/invite.sh teammate@rokomari.com member          # invite -> prints accept link
 docker compose exec -T postgres psql -U remote -d remote < sql/protect-service-account.sql   # (re)apply guard
 # upgrade remote image (keep profile!):  edit IMAGE_TAG in .env then:
 docker compose --profile ingest pull remote && docker compose --profile ingest up -d remote
 ```
 Ingest API key:  `ssh -i ~/.ssh/dev ubuntu@103.228.38.106 'grep INGEST_API_KEY /home/ubuntu/vibe-kanban/.env'`
+
+Memory API key: `ssh -i ~/.ssh/dev ubuntu@103.228.38.106 'grep MEMORY_API_KEY /home/ubuntu/vibe-kanban/.env'`

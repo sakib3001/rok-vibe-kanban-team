@@ -160,6 +160,88 @@ services:
     networks: [internal]
 
   # ---------------------------------------------------------------------------
+  # Memory DB — dedicated pgvector store for org memory embeddings and records.
+  # Enabled with: docker compose --profile memory up -d
+  # ---------------------------------------------------------------------------
+  memory-db:
+    <<: *restart
+    image: pgvector/pgvector:pg16
+    profiles: ["memory"]
+    environment:
+      POSTGRES_USER: memory
+      POSTGRES_PASSWORD: ${MEMORY_DB_PASSWORD:-memory-change-me}
+      POSTGRES_DB: memory
+    volumes:
+      - memory_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U memory -d memory"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [internal]
+
+  # ---------------------------------------------------------------------------
+  # Embedder — Ollama default embedding provider (pluggable via memory service).
+  # ---------------------------------------------------------------------------
+  embedder:
+    <<: *restart
+    image: ollama/ollama:latest
+    profiles: ["memory"]
+    volumes:
+      - ollama_data:/root/.ollama
+    # Footprint cap (§8): keep the CPU embedder from starving the central stack
+    # on the single VM. Tune via .env for higher-volume hosts.
+    cpus: ${EMBEDDER_CPUS:-1.5}
+    mem_limit: ${EMBEDDER_MEM:-2g}
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    networks: [internal]
+
+  # ---------------------------------------------------------------------------
+  # Memory sidecar — MCP-first memory service + thin REST under /memory/*.
+  # ---------------------------------------------------------------------------
+  memory:
+    <<: *restart
+    build: ./memory
+    image: vibe-kanban-memory:local
+    profiles: ["memory"]
+    depends_on:
+      remote:
+        condition: service_healthy
+      memory-db:
+        condition: service_healthy
+      embedder:
+        condition: service_healthy
+    cpus: ${MEMORY_CPUS:-0.5}
+    mem_limit: ${MEMORY_MEM:-256m}
+    environment:
+      MEMORY_PORT: "8091"
+      MEMORY_API_KEY: ${MEMORY_API_KEY:-}
+      MEMORY_DATABASE_URL: postgres://memory:${MEMORY_DB_PASSWORD:-memory-change-me}@memory-db:5432/memory
+      REMOTE_URL: http://remote:8081
+      MEMORY_SVC_EMAIL: ${MEMORY_SVC_EMAIL:-${SELF_HOST_LOCAL_AUTH_EMAIL:-}}
+      MEMORY_SVC_PASSWORD: ${MEMORY_SVC_PASSWORD:-${SELF_HOST_LOCAL_AUTH_PASSWORD:-}}
+      MEMORY_DEFAULT_ORG_ID: ${MEMORY_DEFAULT_ORG_ID:-${INGEST_ORG_ID:-}}
+      EMBED_PROVIDER: ${EMBED_PROVIDER:-ollama}
+      EMBED_BASE_URL: ${EMBED_BASE_URL:-http://embedder:11434}
+      EMBED_MODEL: ${EMBED_MODEL:-nomic-embed-text}
+      EMBED_DIMENSIONS: ${EMBED_DIMENSIONS:-768}
+      EMBED_API_KEY: ${EMBED_API_KEY:-}
+      EMBED_BATCH: ${EMBED_BATCH:-32}
+      EMBED_MAX_RETRIES: ${EMBED_MAX_RETRIES:-4}
+      MEMORY_ALLOWED_ORG_IDS: ${MEMORY_ALLOWED_ORG_IDS:-${MEMORY_DEFAULT_ORG_ID:-${INGEST_ORG_ID:-}}}
+      MEMORY_RETENTION_NOISY_DAYS: ${MEMORY_RETENTION_NOISY_DAYS:-90}
+      MEMORY_RETENTION_PURGE_DAYS: ${MEMORY_RETENTION_PURGE_DAYS:-30}
+      MEMORY_DOC_ROOT: /workspace
+      MEMORY_DOC_INCLUDE: ${MEMORY_DOC_INCLUDE:-HANDOFF.md,GO_LIVE.md,SYSTEM_DESIGN.md,EXECUTION_PLAN.md,DEPLOYMENT_README.md,DEVELOPER_ONBOARDING.md,REQUIREMENTS_AND_PLAN.md}
+    volumes:
+      - ./:/workspace:ro
+    networks: [internal]
+
+  # ---------------------------------------------------------------------------
   # Caddy — TLS termination + reverse proxy. Automatic Let's Encrypt certs.
   # Only the remote API is exposed publicly; electric stays internal.
   # ---------------------------------------------------------------------------
@@ -185,6 +267,8 @@ volumes:
   caddy_data:
   caddy_config:
   ingest_data:
+  memory_db_data:
+  ollama_data:
 
 networks:
   internal:

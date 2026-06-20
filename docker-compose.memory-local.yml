@@ -1,0 +1,60 @@
+# Standalone LOCAL test harness for the Organization Memory layer.
+# Brings up only memory-db + embedder + memory (no central stack) so the
+# semantic / ingestion / governance paths can be exercised on a dev machine.
+# Deterministic tools (recent_changes/project_brief) need the live VK API and
+# are covered separately against the server.
+#
+#   docker compose -f docker-compose.memory-local.yml up -d
+name: vk-memory-local
+
+services:
+  memory-db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: memory
+      POSTGRES_PASSWORD: memory-local
+      POSTGRES_DB: memory
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U memory -d memory"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  embedder:
+    image: ollama/ollama:latest
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  memory:
+    build: ./memory
+    image: vibe-kanban-memory:local
+    ports:
+      - "8099:8091"
+    depends_on:
+      memory-db:
+        condition: service_healthy
+      embedder:
+        condition: service_healthy
+    environment:
+      MEMORY_PORT: "8091"
+      MEMORY_API_KEY: ${MEMORY_API_KEY:-local-test-key}
+      MEMORY_DATABASE_URL: postgres://memory:memory-local@memory-db:5432/memory
+      # Deterministic tools point here; unused by the semantic/ingestion tests.
+      REMOTE_URL: ${REMOTE_URL:-https://vk.rokomari.io}
+      MEMORY_SVC_EMAIL: ${MEMORY_SVC_EMAIL:-local@example.com}
+      MEMORY_SVC_PASSWORD: ${MEMORY_SVC_PASSWORD:-local-not-used}
+      MEMORY_DEFAULT_ORG_ID: ${MEMORY_DEFAULT_ORG_ID:-a6a82264-9129-4537-aae4-63b51181b243}
+      MEMORY_ALLOWED_ORG_IDS: ${MEMORY_DEFAULT_ORG_ID:-a6a82264-9129-4537-aae4-63b51181b243}
+      EMBED_PROVIDER: ollama
+      EMBED_BASE_URL: http://embedder:11434
+      EMBED_MODEL: nomic-embed-text
+      EMBED_DIMENSIONS: "768"
+      EMBED_BATCH: "16"
+      MEMORY_RETENTION_NOISY_DAYS: "90"
+      MEMORY_RETENTION_PURGE_DAYS: "30"
+      MEMORY_DOC_ROOT: /workspace
+    volumes:
+      - ./:/workspace:ro

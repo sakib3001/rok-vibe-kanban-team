@@ -1,0 +1,14 @@
+{
+  "name": "vibe-kanban-memory",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Organization memory sidecar service for Vibe Kanban",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "mcp": "node server.js --mcp-stdio"
+  },
+  "dependencies": {
+    "pg": "^8.13.1"
+  }
+}
