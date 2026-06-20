@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 use super::identity_errors::IdentityError;
 
-pub(super) async fn add_member<'a, E>(
+pub(crate) async fn add_member<'a, E>(
     executor: E,
     organization_id: Uuid,
     user_id: Uuid,
@@ -172,7 +172,7 @@ pub(crate) async fn list_users_by_organization(
     .await
 }
 
-pub(super) async fn assert_admin(
+pub(crate) async fn assert_admin(
     pool: &PgPool,
     organization_id: Uuid,
     user_id: Uuid,

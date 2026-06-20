@@ -31,6 +31,9 @@ pub(crate) enum LocalAuthError {
 pub(crate) fn auth_methods_response(state: &AppState) -> AuthMethodsResponse {
     AuthMethodsResponse {
         local_auth_enabled: state.config().auth.local().is_some(),
+        // Credential auth is always available once at least one user has been
+        // provisioned; surfacing it as enabled lets the UI render the form.
+        credential_auth_enabled: true,
         oauth_providers: state.providers().names(),
     }
 }

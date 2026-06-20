@@ -41,8 +41,39 @@ pub struct LocalLoginResponse {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, TS)]
+pub struct CredentialLoginRequest {
+    pub email: String,
+    pub password: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, TS)]
+pub struct CredentialLoginResponse {
+    pub access_token: String,
+    pub refresh_token: String,
+    pub must_change_password: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, TS)]
+pub struct ChangePasswordRequest {
+    pub current_password: String,
+    pub new_password: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, TS)]
+pub struct PasswordResetRequest {
+    pub email: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, TS)]
+pub struct PasswordResetCompleteRequest {
+    pub token: String,
+    pub new_password: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, TS)]
 pub struct AuthMethodsResponse {
     pub local_auth_enabled: bool,
+    pub credential_auth_enabled: bool,
     pub oauth_providers: Vec<String>,
 }
 

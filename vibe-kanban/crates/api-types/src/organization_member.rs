@@ -24,3 +24,32 @@ pub struct OrganizationMember {
     pub joined_at: DateTime<Utc>,
     pub last_seen_at: Option<DateTime<Utc>>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct ProvisionMemberRequest {
+    pub email: String,
+    pub role: MemberRole,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_name: Option<String>,
+    /// Optional handle. When omitted, the server derives one from the email prefix.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    /// When true, a generated temporary password is returned in the response (for
+    /// admin tooling that prefers in-band delivery to email). The user is still
+    /// required to change it on first login.
+    #[serde(default)]
+    pub return_password: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct ProvisionMemberResponse {
+    pub user_id: Uuid,
+    pub email: String,
+    pub role: MemberRole,
+    pub organization_id: Uuid,
+    /// Only populated when the request asked for in-band password return.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temporary_password: Option<String>,
+}

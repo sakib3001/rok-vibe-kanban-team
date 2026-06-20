@@ -9,6 +9,7 @@ export type OAuthProvider = "github" | "google" | "zoho";
 
 export type AuthMethodsResponse = {
   local_auth_enabled: boolean;
+  credential_auth_enabled?: boolean;
   oauth_providers: string[];
 };
 
@@ -223,4 +224,54 @@ export async function listOrganizationProjects(
 
   const body = (await res.json()) as { projects: Project[] };
   return body.projects;
+}
+
+export type CredentialLoginResponse = {
+  access_token: string;
+  refresh_token: string;
+  must_change_password: boolean;
+};
+
+export async function credentialLogin(
+  email: string,
+  password: string,
+): Promise<CredentialLoginResponse> {
+  const res = await fetch(`${API_BASE}/v1/auth/credential/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password }),
+  });
+  if (!res.ok) {
+    throw new Error(`Credential login failed (${res.status})`);
+  }
+  return res.json();
+}
+
+export async function changePassword(
+  currentPassword: string,
+  newPassword: string,
+  accessToken: string,
+): Promise<void> {
+  const res = await fetch(`${API_BASE}/v1/auth/credential/change-password`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${accessToken}`,
+    },
+    body: JSON.stringify({
+      current_password: currentPassword,
+      new_password: newPassword,
+    }),
+  });
+  if (!res.ok) {
+    throw new Error(`Change password failed (${res.status})`);
+  }
+}
+
+export async function requestPasswordReset(email: string): Promise<void> {
+  await fetch(`${API_BASE}/v1/auth/credential/reset-request`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email }),
+  });
 }

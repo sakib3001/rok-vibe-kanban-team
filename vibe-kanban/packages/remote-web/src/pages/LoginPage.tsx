@@ -5,6 +5,7 @@ import {
   getAuthMethods,
   initOAuth,
   localLogin,
+  credentialLogin,
   type OAuthProvider,
 } from "@remote/shared/lib/api";
 import { storeTokens } from "@remote/shared/lib/auth";
@@ -34,6 +35,8 @@ export default function LoginPage() {
   });
 
   const hasLocalAuth = authMethods?.local_auth_enabled ?? false;
+  const hasCredentialAuth = authMethods?.credential_auth_enabled ?? false;
+  const hasAnyEmailLogin = hasLocalAuth || hasCredentialAuth;
   const oauthProviders = authMethods?.oauth_providers ?? [];
   const hasOAuthProviders = oauthProviders.length > 0;
 
@@ -66,15 +69,35 @@ export default function LoginPage() {
     setPending("local");
     setError(null);
 
+    const trimmedEmail = email.trim();
     try {
+      if (hasCredentialAuth) {
+        try {
+          const cred = await credentialLogin(trimmedEmail, password);
+          await storeTokens(cred.access_token, cred.refresh_token);
+          if (cred.must_change_password) {
+            const target = next || "/";
+            window.location.replace(
+              `/account/change-password?must=1&next=${encodeURIComponent(target)}`,
+            );
+          } else {
+            window.location.replace(next || "/");
+          }
+          return;
+        } catch (credErr) {
+          if (!hasLocalAuth) {
+            throw credErr;
+          }
+        }
+      }
       const { access_token, refresh_token } = await localLogin(
-        email.trim(),
+        trimmedEmail,
         password,
       );
       await storeTokens(access_token, refresh_token);
       window.location.replace(next || "/");
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Local login failed");
+      setError(e instanceof Error ? e.message : "Login failed");
       setPending(null);
     }
   };
@@ -107,7 +130,7 @@ export default function LoginPage() {
           )}
 
           <section className="space-y-3">
-            {!isAuthMethodsError && hasLocalAuth && (
+            {!isAuthMethodsError && hasAnyEmailLogin && (
               <div className="space-y-3 rounded-sm border border-border bg-primary p-base">
                 <div className="space-y-2">
                   <Label htmlFor="self-host-email">Email</Label>
@@ -142,7 +165,7 @@ export default function LoginPage() {
               </div>
             )}
 
-            {!isAuthMethodsError && hasLocalAuth && hasOAuthProviders && (
+            {!isAuthMethodsError && hasAnyEmailLogin && hasOAuthProviders && (
               <div className="flex items-center gap-3 text-xs uppercase tracking-[0.12em] text-low">
                 <div className="h-px flex-1 bg-border" />
                 <span>or continue with</span>

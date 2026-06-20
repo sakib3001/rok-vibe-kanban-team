@@ -1,12 +1,12 @@
 use api_types::{
-    ListMembersResponse, MemberRole, OrganizationMemberWithProfile, RevokeInvitationRequest,
-    UpdateMemberRoleRequest, UpdateMemberRoleResponse,
+    ListMembersResponse, MemberRole, OrganizationMemberWithProfile, ProvisionMemberRequest, RevokeInvitationRequest, UpdateMemberRoleRequest,
+    UpdateMemberRoleResponse,
 };
 use axum::{
     Json, Router,
     extract::{Path, State},
     http::StatusCode,
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     routing::{delete, get, patch, post},
 };
 use chrono::{Duration, Utc};
@@ -19,7 +19,7 @@ use super::error::{ErrorResponse, membership_error};
 use crate::{
     AppState,
     audit::{self, AuditAction, AuditEvent},
-    auth::RequestContext,
+    auth::{RequestContext, credential_provision_member},
     db::{
         identity_errors::IdentityError,
         invitations::{Invitation, InvitationRepository},
@@ -48,6 +48,10 @@ pub(super) fn protected_router() -> Router<AppState> {
         )
         .route("/invitations/{token}/accept", post(accept_invitation))
         .route("/organizations/{org_id}/members", get(list_members))
+        .route(
+            "/organizations/{org_id}/members/provision",
+            post(provision_member),
+        )
         .route(
             "/organizations/{org_id}/members/{user_id}",
             delete(remove_member),
@@ -317,6 +321,56 @@ async fn accept_invitation(
         organization_slug: org.slug,
         role,
     }))
+}
+
+async fn provision_member(
+    State(state): State<AppState>,
+    axum::extract::Extension(ctx): axum::extract::Extension<RequestContext>,
+    Path(org_id): Path<Uuid>,
+    Json(payload): Json<ProvisionMemberRequest>,
+) -> Response {
+    let admin = ctx.user.clone();
+    let role = payload.role;
+    let response = match credential_provision_member(
+        &state,
+        org_id,
+        admin.id,
+        admin.username.as_deref(),
+        &payload,
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(err) => return err.into_response(),
+    };
+
+    audit::emit(
+        AuditEvent::from_request(&ctx, AuditAction::MemberInvite)
+            .resource("organization_member", Some(response.user_id))
+            .organization(org_id)
+            .http(
+                "POST",
+                format!("/v1/organizations/{org_id}/members/provision"),
+                201,
+            )
+            .description(format!(
+                "Provisioned credential member with role {role:?}"
+            )),
+    );
+
+    if let Some(analytics) = state.analytics() {
+        analytics.track(
+            ctx.user.id,
+            "member_provisioned",
+            serde_json::json!({
+                "organization_id": org_id,
+                "user_id": response.user_id,
+                "role": format!("{role:?}"),
+            }),
+        );
+    }
+
+    (StatusCode::CREATED, Json(response)).into_response()
 }
 
 async fn list_members(

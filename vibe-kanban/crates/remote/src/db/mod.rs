@@ -20,6 +20,7 @@ pub mod oauth;
 pub mod oauth_accounts;
 pub mod organization_members;
 pub mod organizations;
+pub mod password_reset_tokens;
 pub mod pending_uploads;
 pub mod project_notification_preferences;
 pub mod project_statuses;
@@ -29,6 +30,7 @@ pub mod pull_requests;
 pub mod reviews;
 pub mod tags;
 pub mod types;
+pub mod user_passwords;
 pub mod users;
 pub mod workspaces;
 

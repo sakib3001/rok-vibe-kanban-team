@@ -51,6 +51,7 @@ uuid = { version = "1", features = ["serde", "v4"] }
 jsonwebtoken = { version = "10.2.0", features = ["rust_crypto"] }
 rand = "0.9"
 sha2 = "0.10"
+argon2 = "0.5"
 hmac = "0.12"
 subtle = "2.5"
 hex = "0.4"

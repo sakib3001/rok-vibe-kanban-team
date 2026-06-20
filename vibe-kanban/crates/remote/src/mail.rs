@@ -9,6 +9,11 @@ use crate::digest::DigestError;
 const DEFAULT_INVITE_TEMPLATE_ID: &str = "cmlb3zqwe03960i159htyb93d";
 const DEFAULT_REVIEW_READY_TEMPLATE_ID: &str = "cmlb45ki603ia0i1pdiq2ekyr";
 const DEFAULT_REVIEW_FAILED_TEMPLATE_ID: &str = "cmlb44vqe03p90i04bwkfqjv3";
+// Override these per environment via LOOPS_CREDENTIAL_INVITE_TEMPLATE_ID /
+// LOOPS_PASSWORD_RESET_TEMPLATE_ID. The defaults fall back to the standard
+// invite template so deployments without dedicated templates still send *something*.
+const DEFAULT_CREDENTIAL_INVITE_TEMPLATE_ID: &str = "cmlb3zqwe03960i159htyb93d";
+const DEFAULT_PASSWORD_RESET_TEMPLATE_ID: &str = "cmlb3zqwe03960i159htyb93d";
 
 fn env_or(var: &str, default: &str) -> String {
     std::env::var(var)
@@ -48,6 +53,20 @@ pub trait Mailer: Send + Sync {
     async fn send_review_ready(&self, email: &str, review_url: &str, pr_name: &str);
 
     async fn send_review_failed(&self, email: &str, pr_name: &str, review_id: &str);
+
+    /// Send credentials to a freshly provisioned user (org invite via password).
+    async fn send_credential_invite(
+        &self,
+        org_name: &str,
+        email: &str,
+        login_url: &str,
+        temporary_password: &str,
+        role: MemberRole,
+        invited_by: Option<&str>,
+    );
+
+    /// Send a one-time password reset link.
+    async fn send_password_reset(&self, email: &str, reset_url: &str);
 
     async fn send_digest_event(
         &self,
@@ -94,6 +113,29 @@ impl Mailer for NoopMailer {
         );
     }
 
+    async fn send_credential_invite(
+        &self,
+        org_name: &str,
+        email: &str,
+        _login_url: &str,
+        _temporary_password: &str,
+        _role: MemberRole,
+        _invited_by: Option<&str>,
+    ) {
+        tracing::warn!(
+            email = %email,
+            org_name = %org_name,
+            "Email service not configured — skipping credential invite email. Set LOOPS_EMAIL_API_KEY to enable."
+        );
+    }
+
+    async fn send_password_reset(&self, email: &str, _reset_url: &str) {
+        tracing::warn!(
+            email = %email,
+            "Email service not configured — skipping password reset email. Set LOOPS_EMAIL_API_KEY to enable."
+        );
+    }
+
     async fn send_digest_event(
         &self,
         contact: &DigestContact<'_>,
@@ -117,6 +159,8 @@ pub struct LoopsMailer {
     invite_template_id: String,
     review_ready_template_id: String,
     review_failed_template_id: String,
+    credential_invite_template_id: String,
+    password_reset_template_id: String,
 }
 
 impl LoopsMailer {
@@ -135,6 +179,14 @@ impl LoopsMailer {
             "LOOPS_REVIEW_FAILED_TEMPLATE_ID",
             DEFAULT_REVIEW_FAILED_TEMPLATE_ID,
         );
+        let credential_invite_template_id = env_or(
+            "LOOPS_CREDENTIAL_INVITE_TEMPLATE_ID",
+            DEFAULT_CREDENTIAL_INVITE_TEMPLATE_ID,
+        );
+        let password_reset_template_id = env_or(
+            "LOOPS_PASSWORD_RESET_TEMPLATE_ID",
+            DEFAULT_PASSWORD_RESET_TEMPLATE_ID,
+        );
 
         Self {
             client,
@@ -142,6 +194,8 @@ impl LoopsMailer {
             invite_template_id,
             review_ready_template_id,
             review_failed_template_id,
+            credential_invite_template_id,
+            password_reset_template_id,
         }
     }
 }
@@ -283,6 +337,106 @@ impl Mailer for LoopsMailer {
             }
             Err(err) => {
                 tracing::error!(error = ?err, "Loops request error for review failed");
+            }
+        }
+    }
+
+    async fn send_credential_invite(
+        &self,
+        org_name: &str,
+        email: &str,
+        login_url: &str,
+        temporary_password: &str,
+        role: MemberRole,
+        invited_by: Option<&str>,
+    ) {
+        let role_str = match role {
+            MemberRole::Admin => "admin",
+            MemberRole::Member => "member",
+        };
+        let inviter = invited_by.unwrap_or("someone");
+
+        if cfg!(debug_assertions) {
+            tracing::info!(
+                "Sending credential invite email to {email}\n\
+                 Organization: {org_name}\n\
+                 Role: {role_str}\n\
+                 Invited by: {inviter}\n\
+                 Login URL: {login_url}"
+            );
+        }
+
+        let payload = json!({
+            "transactionalId": self.credential_invite_template_id,
+            "email": email,
+            "dataVariables": {
+                "org_name": org_name,
+                "login_url": login_url,
+                "login_email": email,
+                "temporary_password": temporary_password,
+                "role": role_str,
+                "invited_by": inviter,
+            }
+        });
+
+        let res = self
+            .client
+            .post("https://app.loops.so/api/v1/transactional")
+            .bearer_auth(&self.api_key)
+            .json(&payload)
+            .send()
+            .await;
+
+        match res {
+            Ok(resp) if resp.status().is_success() => {
+                tracing::debug!("Credential invite email sent via Loops to {email}");
+            }
+            Ok(resp) => {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                tracing::warn!(status = %status, body = %body, "Loops send failed for credential invite");
+            }
+            Err(err) => {
+                tracing::error!(error = ?err, "Loops request error for credential invite");
+            }
+        }
+    }
+
+    async fn send_password_reset(&self, email: &str, reset_url: &str) {
+        if cfg!(debug_assertions) {
+            tracing::info!(
+                "Sending password reset email to {email}\n\
+                 Reset URL: {reset_url}"
+            );
+        }
+
+        let payload = json!({
+            "transactionalId": self.password_reset_template_id,
+            "email": email,
+            "dataVariables": {
+                "reset_url": reset_url,
+            }
+        });
+
+        let res = self
+            .client
+            .post("https://app.loops.so/api/v1/transactional")
+            .bearer_auth(&self.api_key)
+            .json(&payload)
+            .send()
+            .await;
+
+        match res {
+            Ok(resp) if resp.status().is_success() => {
+                tracing::debug!("Password reset email sent via Loops to {email}");
+            }
+            Ok(resp) => {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                tracing::warn!(status = %status, body = %body, "Loops send failed for password reset");
+            }
+            Err(err) => {
+                tracing::error!(error = ?err, "Loops request error for password reset");
             }
         }
     }

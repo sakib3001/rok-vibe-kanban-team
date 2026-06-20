@@ -1,8 +1,10 @@
 use std::borrow::Cow;
 
 use api_types::{
-    AuthMethodsResponse, HandoffInitRequest, HandoffInitResponse, HandoffRedeemRequest,
-    HandoffRedeemResponse, LocalLoginRequest, LocalLoginResponse, ProfileResponse, ProviderProfile,
+    AuthMethodsResponse, ChangePasswordRequest, CredentialLoginRequest, CredentialLoginResponse,
+    HandoffInitRequest, HandoffInitResponse, HandoffRedeemRequest, HandoffRedeemResponse,
+    LocalLoginRequest, LocalLoginResponse, PasswordResetCompleteRequest, PasswordResetRequest,
+    ProfileResponse, ProviderProfile,
 };
 use axum::{
     Json, Router,
@@ -20,8 +22,10 @@ use crate::{
     AppState,
     audit::{self, AuditAction, AuditEvent},
     auth::{
-        CallbackResult, HandoffError, LocalAuthError, RequestContext, auth_methods_response,
-        login as local_login_flow,
+        CallbackResult, CredentialAuthError, HandoffError, LocalAuthError, RequestContext,
+        auth_methods_response, credential_change_password,
+        credential_complete_password_reset, credential_login as credential_login_flow,
+        credential_request_password_reset, login as local_login_flow,
     },
     db::{oauth::OAuthHandoffError, oauth_accounts::OAuthAccountRepository},
 };
@@ -30,6 +34,12 @@ pub(super) fn public_router() -> Router<AppState> {
     Router::new()
         .route("/auth/methods", get(auth_methods))
         .route("/auth/local/login", post(local_login))
+        .route("/auth/credential/login", post(credential_login))
+        .route(
+            "/auth/credential/reset-request",
+            post(credential_reset_request),
+        )
+        .route("/auth/credential/reset", post(credential_reset))
         .route("/oauth/web/init", post(web_init))
         .route("/oauth/web/redeem", post(web_redeem))
         .route("/oauth/{provider}/start", get(authorize_start))
@@ -44,6 +54,10 @@ pub(super) fn protected_router() -> Router<AppState> {
     Router::new()
         .route("/profile", get(profile))
         .route("/oauth/logout", post(logout))
+        .route(
+            "/auth/credential/change-password",
+            post(credential_change_password_route),
+        )
 }
 
 async fn web_init(
@@ -117,6 +131,40 @@ async fn local_login(
 ) -> Result<Json<LocalLoginResponse>, LocalAuthError> {
     let response = local_login_flow(&state, &payload).await?;
     Ok(Json(response))
+}
+
+async fn credential_login(
+    State(state): State<AppState>,
+    Json(payload): Json<CredentialLoginRequest>,
+) -> Result<Json<CredentialLoginResponse>, CredentialAuthError> {
+    let response = credential_login_flow(&state, &payload).await?;
+    Ok(Json(response))
+}
+
+async fn credential_change_password_route(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<RequestContext>,
+    Json(payload): Json<ChangePasswordRequest>,
+) -> Result<StatusCode, CredentialAuthError> {
+    credential_change_password(&state, ctx.user.id, &payload).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn credential_reset_request(
+    State(state): State<AppState>,
+    Json(payload): Json<PasswordResetRequest>,
+) -> StatusCode {
+    // Always 202 — never reveal whether the email exists.
+    credential_request_password_reset(&state, &payload.email).await;
+    StatusCode::ACCEPTED
+}
+
+async fn credential_reset(
+    State(state): State<AppState>,
+    Json(payload): Json<PasswordResetCompleteRequest>,
+) -> Result<StatusCode, CredentialAuthError> {
+    credential_complete_password_reset(&state, &payload).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Debug, Deserialize)]
