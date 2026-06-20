@@ -31,6 +31,14 @@ use crate::{
 };
 
 pub(super) const CREDENTIAL_AUTH_PROVIDER: &str = "credential";
+
+/// Credential sessions (email + password) have no upstream OAuth provider token,
+/// so token refresh must skip provider-token re-validation for them — same as
+/// the bootstrap `local` provider.
+pub(crate) fn is_credential_provider(provider: &str) -> bool {
+    provider == CREDENTIAL_AUTH_PROVIDER
+}
+
 const RESET_TOKEN_TTL_HOURS: i64 = 1;
 const TEMPORARY_PASSWORD_LEN: usize = 16;
 const MIN_PASSWORD_LEN: usize = 8;

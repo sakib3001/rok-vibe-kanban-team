@@ -11,7 +11,7 @@ use tracing::{info, warn};
 use crate::{
     AppState,
     audit::{self, AuditAction, AuditEvent},
-    auth::{JwtError, OAuthTokenValidationError, is_local_provider},
+    auth::{JwtError, OAuthTokenValidationError, is_credential_provider, is_local_provider},
     db::{
         auth::{AuthSessionError, AuthSessionRepository},
         identity_errors::IdentityError,
@@ -180,7 +180,9 @@ async fn refresh_token(
         );
     }
 
-    if !is_local_provider(&token_details.provider) {
+    if !is_local_provider(&token_details.provider)
+        && !is_credential_provider(&token_details.provider)
+    {
         state
             .oauth_token_validator()
             .validate(

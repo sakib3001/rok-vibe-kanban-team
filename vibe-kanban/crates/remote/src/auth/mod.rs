@@ -8,7 +8,7 @@ mod provider;
 
 pub(crate) use credential::{
     CredentialAuthError, change_password as credential_change_password,
-    complete_password_reset as credential_complete_password_reset,
+    complete_password_reset as credential_complete_password_reset, is_credential_provider,
     login as credential_login, provision_member as credential_provision_member,
     request_password_reset as credential_request_password_reset,
 };
