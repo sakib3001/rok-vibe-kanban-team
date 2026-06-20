@@ -3,6 +3,7 @@ import { create, useModal } from '@ebay/nice-modal-react';
 import { useTranslation } from 'react-i18next';
 import type { Project } from 'shared/remote-types';
 import type { OrganizationMemberWithProfile } from 'shared/types';
+import { MemberRole } from 'shared/types';
 import { defineModal } from '@/shared/lib/modals';
 import { CommandDialog } from '@vibe/ui/components/Command';
 import {
@@ -12,6 +13,7 @@ import {
 import { UserAvatar } from '@vibe/ui/components/UserAvatar';
 import { OrgProvider } from '@/shared/providers/remote/OrgProvider';
 import { useOrgContext } from '@/shared/hooks/useOrgContext';
+import { useAuth } from '@/shared/hooks/auth/useAuth';
 import { ProjectProvider } from '@/shared/providers/remote/ProjectProvider';
 import { useProjectContext } from '@/shared/hooks/useProjectContext';
 import { useOrganizationStore } from '@/shared/stores/useOrganizationStore';
@@ -85,6 +87,12 @@ function AssigneeSelectionContent({
     () => [...membersWithProfilesById.values()],
     [membersWithProfilesById]
   );
+
+  // Assignees are admin-controlled (enforced server-side). For non-admins the
+  // dialog is read-only — they can see assignees but cannot change them.
+  const { userId } = useAuth();
+  const isAdmin =
+    !!userId && membersWithProfilesById.get(userId)?.role === MemberRole.ADMIN;
 
   // Get issue assignees and mutation functions from ProjectContext
   const { issueAssignees, insertIssueAssignee, removeIssueAssignee } =
@@ -164,6 +172,8 @@ function AssigneeSelectionContent({
 
   const handleToggle = useCallback(
     (userId: string) => {
+      // Only admins may set/change assignees; ignore toggles otherwise.
+      if (!isAdmin) return;
       const isSelected = selectedIds.includes(userId);
 
       if (isCreateMode) {
@@ -205,6 +215,7 @@ function AssigneeSelectionContent({
       setIssueComposerAssigneeIds,
       insertIssueAssignee,
       removeIssueAssignee,
+      isAdmin,
     ]
   );
 
@@ -225,7 +236,11 @@ function AssigneeSelectionContent({
       onCloseAutoFocus={handleCloseAutoFocus}
     >
       <MultiSelectCommandBar
-        title={t('kanban.selectAssignees', 'Select assignees...')}
+        title={
+          isAdmin
+            ? t('kanban.selectAssignees', 'Select assignees...')
+            : t('kanban.assigneesReadonly', 'Assignees (admin only)')
+        }
         options={options}
         selectedValues={selectedIds}
         onToggle={handleToggle}
