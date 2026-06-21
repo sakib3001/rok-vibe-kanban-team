@@ -19,6 +19,7 @@ set -euo pipefail
 SERVICE_NAME="${ROK_VK_SERVICE_NAME:-vibe-kanban}"
 VK_PORT="${ROK_VK_PORT:-8154}"
 CENTRAL_API_BASE="${VK_SHARED_API_BASE:-https://vk.rokomari.io}"
+VK_BINARIES_BASE_URL="${ROK_VK_BINARIES_BASE_URL:-https://rokfiles.rokomari.io}"
 NODE_MIN_MAJOR=20
 NODE_INSTALL_MAJOR=22
 # Where to install the wrapper from. Default: this repo if it looks like the
@@ -64,6 +65,27 @@ sudo npm install -g "$ROK_VK_SOURCE"
 WRAPPER_LINK="$(command -v rok-vibe-kanban)" || die "rok-vibe-kanban not on PATH after install."
 WRAPPER_BIN="$(readlink -f "$WRAPPER_LINK")"
 log "Wrapper installed at ${WRAPPER_BIN}"
+
+# Patch the bundled vibe-kanban-team binary host to our R2 domain.
+WRAPPER_PKG_DIR="$(dirname "$(dirname "$WRAPPER_BIN")")"
+TEAM_CLI_PATH="${WRAPPER_PKG_DIR}/node_modules/vibe-kanban-team/bin/cli.js"
+if [ -f "$TEAM_CLI_PATH" ]; then
+  log "Patching binary host in ${TEAM_CLI_PATH}"
+  sudo "$NODE_BIN" -e '
+const fs = require("fs");
+const file = process.argv[1];
+const newUrl = process.argv[2];
+const src = fs.readFileSync(file, "utf8");
+const next = src.replace(/https:\/\/vibe-kanban-binaries\.[^"'\''\s]+/g, newUrl);
+if (next === src && !src.includes(newUrl)) {
+  console.error(`[install] WARN: could not detect binary host URL in ${file}`);
+  process.exit(0);
+}
+fs.writeFileSync(file, next);
+' "$TEAM_CLI_PATH" "$VK_BINARIES_BASE_URL"
+else
+  warn "Could not find vibe-kanban-team CLI to patch: ${TEAM_CLI_PATH}"
+fi
 
 # ---- 3) systemd --user unit ------------------------------------------------
 UNIT_DIR="${HOME}/.config/systemd/user"
