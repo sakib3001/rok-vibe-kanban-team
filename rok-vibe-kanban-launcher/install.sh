@@ -83,6 +83,7 @@ const root = process.argv[1];
 const newUrl = process.argv[2];
 const oldHostRe = /https:\/\/vibe-kanban-binaries\.[^"'\''\s]+/g;
 let patchedFiles = 0;
+let alreadyCorrectFiles = 0;
 let visitedJs = 0;
 
 function walk(dir) {
@@ -100,15 +101,20 @@ function walk(dir) {
     if (next !== src) {
       fs.writeFileSync(full, next);
       patchedFiles += 1;
+    } else if (src.includes(newUrl)) {
+      // Newer builds already ship the R2 host baked into source; nothing to do.
+      alreadyCorrectFiles += 1;
     }
   }
 }
 
 walk(root);
-if (patchedFiles === 0) {
-  console.error(`[install] WARN: no JS file required binary host patch under ${root} (scanned ${visitedJs} JS files)`);
+if (patchedFiles > 0) {
+  console.log(`[install] patched binary host in ${patchedFiles} JS file(s) under ${root}`);
+} else if (alreadyCorrectFiles > 0) {
+  console.log(`[install] binary host already points to ${newUrl} (${alreadyCorrectFiles} file(s)); no patch needed`);
 } else {
-  console.log(`[install] patched ${patchedFiles} JS files under ${root}`);
+  console.error(`[install] WARN: no binary host found to patch under ${root} (scanned ${visitedJs} JS files); the client may download from an unexpected host`);
 }
 ' "$TEAM_PKG_DIR" "$VK_BINARIES_BASE_URL"
 else
@@ -134,15 +140,17 @@ Wants=network-online.target
 [Service]
 Type=simple
 # Central server + fixed local UI port (see launcher README).
-Environment=VK_SHARED_API_BASE=${CENTRAL_API_BASE}
-Environment=BACKEND_PORT=${VK_PORT}
-Environment=ROK_VK_TEAM_ROOT=${TEAM_PKG_DIR}
+# NOTE: values are double-quoted so paths containing spaces (e.g. a repo dir
+# with a trailing space) are not split by systemd into multiple tokens.
+Environment="VK_SHARED_API_BASE=${CENTRAL_API_BASE}"
+Environment="BACKEND_PORT=${VK_PORT}"
+Environment="ROK_VK_TEAM_ROOT=${TEAM_PKG_DIR}"
 # Keep fallback disabled in production; it can pull an unpatched package.
-Environment=ROK_VK_ALLOW_NPX_FALLBACK=0
+Environment="ROK_VK_ALLOW_NPX_FALLBACK=0"
 # systemd --user starts with a minimal PATH; add node, global npm bin, and the
 # user-local bin where AI CLIs (claude, etc.) install.
-Environment=PATH=${SYSTEMD_PATH}
-ExecStart=${NODE_BIN} ${WRAPPER_BIN}
+Environment="PATH=${SYSTEMD_PATH}"
+ExecStart="${NODE_BIN}" "${WRAPPER_BIN}"
 Restart=on-failure
 RestartSec=5
 

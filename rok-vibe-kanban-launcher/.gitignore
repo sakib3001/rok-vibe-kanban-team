@@ -1,3 +1,6 @@
 node_modules/
 *.log
 .npmrc
+
+# R2 upload staging (binaries belong in the bucket, not git history)
+r2-upload-rokfiles/
