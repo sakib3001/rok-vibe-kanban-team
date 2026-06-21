@@ -18,6 +18,7 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const Busboy = require('busboy');
 
 const PORT = parseInt(process.env.INGEST_PORT || '8090', 10);
 const REMOTE_URL = (process.env.REMOTE_URL || 'http://remote:8081').replace(/\/+$/, '');
@@ -280,45 +281,70 @@ async function uploadR2Object(objectKey, payloadBuffer, contentType = 'applicati
   };
 }
 
-function parseMultipartForm(buffer, boundary) {
-  const out = { fields: {}, file: null };
-  const marker = `--${boundary}`;
-  const body = buffer.toString('latin1');
-  const chunks = body.split(marker);
-  for (const chunk of chunks) {
-    const trimmed = chunk.trim();
-    if (!trimmed || trimmed === '--') continue;
-    const normalized = chunk.startsWith('\r\n') ? chunk.slice(2) : chunk;
-    const sep = normalized.indexOf('\r\n\r\n');
-    if (sep < 0) continue;
-    const headerText = normalized.slice(0, sep);
-    let contentText = normalized.slice(sep + 4);
-    if (contentText.endsWith('\r\n')) contentText = contentText.slice(0, -2);
-    const headers = {};
-    for (const line of headerText.split('\r\n')) {
-      const idx = line.indexOf(':');
-      if (idx < 0) continue;
-      const key = line.slice(0, idx).trim().toLowerCase();
-      const value = line.slice(idx + 1).trim();
-      headers[key] = value;
+function parseMultipartFormRequest(req, limitBytes = UPLOAD_LIMIT_BYTES) {
+  return new Promise((resolve, reject) => {
+    const fields = {};
+    let file = null;
+    let settled = false;
+    function fail(error) {
+      if (settled) return;
+      settled = true;
+      reject(error);
     }
-    const disposition = headers['content-disposition'] || '';
-    const nameMatch = disposition.match(/name="([^"]+)"/i);
-    if (!nameMatch) continue;
-    const fieldName = nameMatch[1];
-    const fileMatch = disposition.match(/filename="([^"]*)"/i);
-    if (fileMatch) {
-      out.file = {
-        field_name: fieldName,
-        filename: sanitizeFileName(fileMatch[1] || ''),
-        content_type: headers['content-type'] || 'application/octet-stream',
-        buffer: Buffer.from(contentText, 'latin1'),
-      };
-      continue;
+    let bb;
+    try {
+      bb = Busboy({
+        headers: req.headers,
+        limits: {
+          files: 1,
+          fields: 20,
+          fieldSize: 64 * 1024,
+          fileSize: limitBytes,
+        },
+      });
+    } catch (error) {
+      return fail(httpErr(400, `invalid multipart form: ${error.message}`));
     }
-    out.fields[fieldName] = Buffer.from(contentText, 'latin1').toString('utf8').trim();
-  }
-  return out;
+
+    bb.on('field', (name, value) => {
+      fields[name] = String(value || '').trim();
+    });
+    bb.on('file', (fieldName, stream, info) => {
+      if (file) {
+        stream.resume();
+        return;
+      }
+      const chunks = [];
+      stream.on('data', (chunk) => {
+        chunks.push(chunk);
+      });
+      stream.on('limit', () => {
+        fail(httpErr(413, 'uploaded file too large'));
+      });
+      stream.on('error', (error) => {
+        fail(httpErr(400, `invalid multipart stream: ${error.message}`));
+      });
+      stream.on('end', () => {
+        if (settled) return;
+        file = {
+          field_name: fieldName,
+          filename: sanitizeFileName(info?.filename || ''),
+          content_type: info?.mimeType || 'application/octet-stream',
+          buffer: Buffer.concat(chunks),
+        };
+      });
+    });
+    bb.on('filesLimit', () => fail(httpErr(413, 'too many multipart files')));
+    bb.on('fieldsLimit', () => fail(httpErr(413, 'too many multipart fields')));
+    bb.on('error', (error) => fail(httpErr(400, `invalid multipart form: ${error.message}`)));
+    bb.on('finish', () => {
+      if (settled) return;
+      settled = true;
+      resolve({ fields, file });
+    });
+    req.on('error', (error) => fail(httpErr(400, `request stream error: ${error.message}`)));
+    req.pipe(bb);
+  });
 }
 
 function buildSignedSourceLinks(sourceObjectKeys, ttlSecs = R2_PRESIGN_EXPIRY_SECS) {
@@ -922,12 +948,7 @@ async function handleUploadRequirementSourceMultipart(req, res) {
   if (!hasR2PresignConfig()) {
     return send(res, 503, { error: 'R2 signing not configured on ingest service' });
   }
-  const contentType = req.headers['content-type'] || '';
-  const m = String(contentType).match(/boundary=([^;]+)/i);
-  if (!m) return send(res, 400, { error: 'multipart boundary is missing' });
-  const boundary = m[1].replace(/^"|"$/g, '');
-  const raw = await readBodyBuffer(req, UPLOAD_LIMIT_BYTES);
-  const parsed = parseMultipartForm(raw, boundary);
+  const parsed = await parseMultipartFormRequest(req, UPLOAD_LIMIT_BYTES);
   if (!parsed.file || !parsed.file.buffer || !parsed.file.buffer.length) {
     return send(res, 400, { error: 'multipart file field is required' });
   }
