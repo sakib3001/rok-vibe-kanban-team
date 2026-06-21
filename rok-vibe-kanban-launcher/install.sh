@@ -19,6 +19,8 @@ set -euo pipefail
 SERVICE_NAME="${ROK_VK_SERVICE_NAME:-vibe-kanban}"
 VK_PORT="${ROK_VK_PORT:-8154}"
 CENTRAL_API_BASE="${VK_SHARED_API_BASE:-https://vk.rokomari.io}"
+BINARIES_BASE_URL="${ROK_VK_BINARIES_BASE_URL:-https://vibe-kanban-binaries.riajul.dev}"
+SKIP_BINARY_PREFLIGHT="${ROK_VK_SKIP_BINARY_PREFLIGHT:-0}"
 NODE_MIN_MAJOR=20
 NODE_INSTALL_MAJOR=22
 # Where to install the wrapper from. Default: this repo if it looks like the
@@ -34,6 +36,8 @@ have() { command -v "$1" >/dev/null 2>&1; }
 
 [ "$(id -u)" -ne 0 ] || die "Run as your normal user, not root (the service runs as you)."
 have sudo || die "sudo is required (for Node install + global npm install)."
+have systemctl || die "systemd/systemctl is required for user service installation."
+have curl || die "curl is required."
 
 # ---- 1) Node >= 20 ---------------------------------------------------------
 node_major() { have node && node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0; }
@@ -65,6 +69,35 @@ WRAPPER_LINK="$(command -v rok-vibe-kanban)" || die "rok-vibe-kanban not on PATH
 WRAPPER_BIN="$(readlink -f "$WRAPPER_LINK")"
 log "Wrapper installed at ${WRAPPER_BIN}"
 
+# ---- 2.5) Preflight: verify binary manifest is reachable --------------------
+if [ "$SKIP_BINARY_PREFLIGHT" != "1" ]; then
+  WRAPPER_PKG_DIR="$(dirname "$(dirname "$WRAPPER_BIN")")"
+  VK_TEAM_VERSION="$(
+    node -e "const p=require(require.resolve('vibe-kanban-team/package.json',{paths:['$WRAPPER_PKG_DIR']}));process.stdout.write(p.version);"
+  )" || die "Could not resolve vibe-kanban-team dependency version for preflight."
+
+  MANIFEST_URL="${BINARIES_BASE_URL}/binaries/v${VK_TEAM_VERSION}/manifest.json"
+  log "Preflight check: ${MANIFEST_URL}"
+
+  HTTP_CODE="$(curl -sS -o /dev/null -w '%{http_code}' "$MANIFEST_URL" || true)"
+  case "$HTTP_CODE" in
+    200|301|302)
+      log "Binary manifest is reachable (HTTP ${HTTP_CODE})."
+      ;;
+    401|403)
+      die "Binary manifest is not accessible (HTTP ${HTTP_CODE}) at ${MANIFEST_URL}.
+Set ROK_VK_BINARIES_BASE_URL to the correct public/mirrored host, or ask platform team to grant access.
+If you intentionally want to continue anyway, re-run with ROK_VK_SKIP_BINARY_PREFLIGHT=1."
+      ;;
+    *)
+      die "Could not reach binary manifest (HTTP ${HTTP_CODE}) at ${MANIFEST_URL}.
+Check network/DNS/firewall/proxy on this device, or re-run with ROK_VK_SKIP_BINARY_PREFLIGHT=1."
+      ;;
+  esac
+else
+  warn "Skipping binary preflight because ROK_VK_SKIP_BINARY_PREFLIGHT=1"
+fi
+
 # ---- 3) systemd --user unit ------------------------------------------------
 UNIT_DIR="${HOME}/.config/systemd/user"
 UNIT_FILE="${UNIT_DIR}/${SERVICE_NAME}.service"
@@ -88,6 +121,9 @@ Environment=BACKEND_PORT=${VK_PORT}
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:%h/.local/bin
 ExecStart=${NODE_BIN} ${WRAPPER_BIN}
 Restart=on-failure
+# The launcher exits with 42 for known non-retryable auth failures
+# (binary manifest endpoint returns HTTP 401).
+RestartPreventExitStatus=42
 RestartSec=5
 
 [Install]
