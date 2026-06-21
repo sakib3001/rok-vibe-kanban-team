@@ -78,8 +78,8 @@ it, then delete the override + `remote-web-dist`. See §6.
   workspace" (→ `/`). Then visible on Amaly + assignable (UI + ingest API).
 - **Loops email is NOT configured** → delivery is manual link sharing. To enable email: set
   `LOOPS_EMAIL_API_KEY` + `LOOPS_INVITE_TEMPLATE_ID` (the baked-in default template IDs are
-  the upstream author's and won't work — must create your own in Loops). Templates:
-  `mail-templates/loops/`.
+  the upstream author's and won't work — author your own templates in the Loops dashboard and
+  set their IDs; patch `0013-update-loops-template-ids.patch` wires the IDs into the code).
 
 ### Service-account protection (`sql/protect-service-account.sql`)
 - A Postgres trigger blocks DELETE/role-downgrade of `admin@rokomari.io`'s membership in the
@@ -184,7 +184,6 @@ docker compose up -d
 ├── scripts/{apply-patches,update-vibe-kanban,publish-npm,invite,backup}.sh
 ├── vibe-kanban/                     # upstream source (submodule @ v0.1.44-20260424091429)
 ├── patches/                         # downstream stack incl. 0040, 0041 + series
-├── mail-templates/loops/            # invite/review email templates
 ├── rok-vibe-kanban-launcher/        # @rokomari/vibe-kanban npx wrapper (install.sh, uninstall.sh)
 ├── README.md
 ├── DEPLOYMENT_README.md  GO_LIVE.md
