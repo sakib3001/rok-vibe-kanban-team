@@ -48,6 +48,7 @@ Responses: `201 {created:true, id, url}` · `200 {deduped:true, id}` (dedup_key 
 3. Human explicitly approves: `POST /ingest/requirements/drafts/{id}/approve`.
 4. Ingest publishes epic + child tasks.
 5. Reject path: `POST /ingest/requirements/drafts/{id}/reject`.
+6. For private R2 source files, fetch fresh access links via `GET /ingest/requirements/drafts/{id}/signed-source-links`.
 
 For payloads and examples, see [`API.md`](./API.md).
 
@@ -125,9 +126,13 @@ docker compose logs -f ingest        # expect "service account logged in" + "def
 | `INGEST_REQUIREMENTS_FILE` | | `/data/requirements-drafts.json` | persisted draft + revision state |
 | `INGEST_MAX_BODY_KB` | | `2048` | max request size for ingest endpoints |
 | `INGEST_MAX_CHILD_TASKS` | | `12` | max auto-published child tasks per epic draft |
+| `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | for private sources | — | needed to generate signed URLs for `source.object_keys` |
+| `R2_REVIEW_ENDPOINT` / `R2_REVIEW_BUCKET` | for private sources | — | endpoint + bucket used for source-link signing |
+| `R2_PRESIGN_EXPIRY_SECS` | | `300` | signed link expiry (seconds) |
 
 ## Notes
 - **Dedup** is by `dedup_key`, persisted to a volume; omit the key to always create a new issue.
 - The single local-auth slot is consumed by the bot — humans still sign in via OAuth.
 - Tokens are obtained via local login and auto-refreshed; on 401 the sidecar refreshes/re-logs in.
 - Requirement drafts are persisted and revisioned by `source.fingerprint`.
+- Private source docs should be provided as `source.object_keys` and accessed using short-lived signed URLs.

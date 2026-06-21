@@ -8,7 +8,9 @@
 //               INGEST_STATUS_ID, INGEST_STATUS_NAME(todo), INGEST_DEDUP_FILE(/data/dedup.json),
 //               INGEST_DEDUP_TTL_DAYS(30), INGEST_PUBLIC_URL,
 //               INGEST_REQUIREMENTS_FILE(/data/requirements-drafts.json),
-//               INGEST_MAX_BODY_KB(2048), INGEST_MAX_CHILD_TASKS(12)
+//               INGEST_MAX_BODY_KB(2048), INGEST_MAX_CHILD_TASKS(12),
+//               R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_REVIEW_ENDPOINT,
+//               R2_REVIEW_BUCKET, R2_PRESIGN_EXPIRY_SECS(300)
 
 const http = require('node:http');
 const fs = require('node:fs');
@@ -33,6 +35,12 @@ const PUBLIC_URL = (process.env.INGEST_PUBLIC_URL || '').replace(/\/+$/, '');
 const REQUIREMENTS_FILE = process.env.INGEST_REQUIREMENTS_FILE || '/data/requirements-drafts.json';
 const BODY_LIMIT_BYTES = (parseInt(process.env.INGEST_MAX_BODY_KB || '2048', 10) || 2048) * 1024;
 const MAX_CHILD_TASKS = parseInt(process.env.INGEST_MAX_CHILD_TASKS || '12', 10) || 12;
+const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID || '';
+const R2_SECRET_ACCESS_KEY = process.env.R2_SECRET_ACCESS_KEY || '';
+const R2_ENDPOINT = (process.env.R2_REVIEW_ENDPOINT || '').replace(/\/+$/, '');
+const R2_BUCKET = process.env.R2_REVIEW_BUCKET || '';
+const R2_REGION = process.env.R2_REGION || 'auto';
+const R2_PRESIGN_EXPIRY_SECS = parseInt(process.env.R2_PRESIGN_EXPIRY_SECS || '300', 10) || 300;
 // Server expects lowercase enum variants: urgent | high | medium | low.
 const PRIORITIES = { urgent: 'urgent', high: 'high', medium: 'medium', low: 'low' };
 const SOURCE_TYPES = new Set(['pdf', 'docx', 'markdown']);
@@ -118,6 +126,113 @@ function safeEqual(a, b) {
   const bb = Buffer.from(String(b));
   if (ab.length !== bb.length) return false;
   return crypto.timingSafeEqual(ab, bb);
+}
+
+function hasR2PresignConfig() {
+  return Boolean(R2_ACCESS_KEY_ID && R2_SECRET_ACCESS_KEY && R2_ENDPOINT && R2_BUCKET);
+}
+
+function awsEncode(value) {
+  return encodeURIComponent(String(value)).replace(/[!'()*]/g, (ch) =>
+    `%${ch.charCodeAt(0).toString(16).toUpperCase()}`
+  );
+}
+
+function formatAmzDate(date) {
+  const yyyy = date.getUTCFullYear();
+  const mm = String(date.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(date.getUTCDate()).padStart(2, '0');
+  const hh = String(date.getUTCHours()).padStart(2, '0');
+  const min = String(date.getUTCMinutes()).padStart(2, '0');
+  const sec = String(date.getUTCSeconds()).padStart(2, '0');
+  return `${yyyy}${mm}${dd}T${hh}${min}${sec}Z`;
+}
+
+function normalizeObjectKey(key) {
+  const clean = String(key || '').trim().replace(/^\/+/, '');
+  if (!clean) throw httpErr(400, 'source.object_keys contains an empty key');
+  return clean;
+}
+
+function signHmac(key, msg, encoding = undefined) {
+  const h = crypto.createHmac('sha256', key).update(msg);
+  return encoding ? h.digest(encoding) : h.digest();
+}
+
+function presignR2ObjectGet(objectKey, expiresSecs = R2_PRESIGN_EXPIRY_SECS) {
+  if (!hasR2PresignConfig()) {
+    throw httpErr(503, 'R2 signing not configured on ingest service');
+  }
+  const ttl = Math.max(60, Math.min(3600, parseInt(expiresSecs, 10) || R2_PRESIGN_EXPIRY_SECS));
+  const endpoint = new URL(R2_ENDPOINT);
+  const host = endpoint.host;
+  const now = new Date();
+  const amzDate = formatAmzDate(now);
+  const dateStamp = amzDate.slice(0, 8);
+  const credentialScope = `${dateStamp}/${R2_REGION}/s3/aws4_request`;
+  const encodedKey = normalizeObjectKey(objectKey)
+    .split('/')
+    .map(awsEncode)
+    .join('/');
+  const basePath = endpoint.pathname && endpoint.pathname !== '/' ? endpoint.pathname.replace(/\/+$/, '') : '';
+  const canonicalUri = `${basePath}/${awsEncode(R2_BUCKET)}/${encodedKey}`;
+  const query = {
+    'X-Amz-Algorithm': 'AWS4-HMAC-SHA256',
+    'X-Amz-Credential': `${R2_ACCESS_KEY_ID}/${credentialScope}`,
+    'X-Amz-Date': amzDate,
+    'X-Amz-Expires': String(ttl),
+    'X-Amz-SignedHeaders': 'host',
+  };
+  const canonicalQuery = Object.keys(query)
+    .sort()
+    .map((k) => `${awsEncode(k)}=${awsEncode(query[k])}`)
+    .join('&');
+  const canonicalHeaders = `host:${host}\n`;
+  const canonicalRequest = [
+    'GET',
+    canonicalUri,
+    canonicalQuery,
+    canonicalHeaders,
+    'host',
+    'UNSIGNED-PAYLOAD',
+  ].join('\n');
+  const stringToSign = [
+    'AWS4-HMAC-SHA256',
+    amzDate,
+    credentialScope,
+    crypto.createHash('sha256').update(canonicalRequest).digest('hex'),
+  ].join('\n');
+  const kDate = signHmac(`AWS4${R2_SECRET_ACCESS_KEY}`, dateStamp);
+  const kRegion = signHmac(kDate, R2_REGION);
+  const kService = signHmac(kRegion, 's3');
+  const kSigning = signHmac(kService, 'aws4_request');
+  const signature = signHmac(kSigning, stringToSign, 'hex');
+  const signedQuery = `${canonicalQuery}&X-Amz-Signature=${signature}`;
+  return `${endpoint.origin}${canonicalUri}?${signedQuery}`;
+}
+
+function buildR2DurableUri(objectKey) {
+  return `r2://${R2_BUCKET}/${normalizeObjectKey(objectKey)}`;
+}
+
+function buildSignedSourceLinks(sourceObjectKeys, ttlSecs = R2_PRESIGN_EXPIRY_SECS) {
+  if (!Array.isArray(sourceObjectKeys) || !sourceObjectKeys.length) return [];
+  if (!hasR2PresignConfig()) return [];
+  return sourceObjectKeys.map((key) => {
+    const clean = normalizeObjectKey(key);
+    return {
+      key: clean,
+      url: presignR2ObjectGet(clean, ttlSecs),
+      expires_in_secs: Math.max(60, Math.min(3600, parseInt(ttlSecs, 10) || R2_PRESIGN_EXPIRY_SECS)),
+    };
+  });
+}
+
+function withSignedLinks(draft, ttlSecs = R2_PRESIGN_EXPIRY_SECS) {
+  return {
+    ...draft,
+    signed_source_links: buildSignedSourceLinks(draft.source_object_keys || [], ttlSecs),
+  };
 }
 
 async function rpc(pathname, { method = 'GET', token, body } = {}) {
@@ -332,6 +447,19 @@ function validateRequirementDraftPayload(body) {
   if (!body.source.fingerprint || typeof body.source.fingerprint !== 'string') {
     return 'source.fingerprint is required';
   }
+  if (body.source.object_keys !== undefined) {
+    if (!Array.isArray(body.source.object_keys)) {
+      return 'source.object_keys must be an array of strings when provided';
+    }
+    for (const key of body.source.object_keys) {
+      if (typeof key !== 'string' || !String(key).trim()) {
+        return 'source.object_keys must contain non-empty strings';
+      }
+    }
+    if (body.source.object_keys.length && !hasR2PresignConfig()) {
+      return 'R2 signing is not configured; set R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_REVIEW_ENDPOINT, R2_REVIEW_BUCKET';
+    }
+  }
   if (!body.epic || typeof body.epic !== 'object') return 'epic is required';
   if (!body.epic.title || typeof body.epic.title !== 'string') {
     return 'epic.title is required';
@@ -471,6 +599,13 @@ async function handleCreateRequirementDraft(req, res) {
   const sourceType = String(body.source.type).toLowerCase();
   const sourceFingerprint = String(body.source.fingerprint).trim();
   const sourceLinks = Array.isArray(body.source.links) ? body.source.links.map(String) : [];
+  const sourceObjectKeys = Array.isArray(body.source.object_keys)
+    ? body.source.object_keys.map((key) => normalizeObjectKey(key))
+    : [];
+  const durableSourceLinks = [
+    ...sourceLinks,
+    ...sourceObjectKeys.map((key) => buildR2DurableUri(key)),
+  ];
   const existing = requirementState.source_index[sourceFingerprint];
   const revisionNumber = existing ? (existing.last_revision_number || 0) + 1 : 1;
   const changeType = existing ? 'revision' : 'new';
@@ -489,7 +624,8 @@ async function handleCreateRequirementDraft(req, res) {
     created_at: now,
     source_type: sourceType,
     source_fingerprint: sourceFingerprint,
-    source_links: sourceLinks,
+    source_links: [...new Set(durableSourceLinks)],
+    source_object_keys: sourceObjectKeys,
     revision_number: revisionNumber,
     generated_by: body.generated_by || 'agent',
     metadata: body.metadata && typeof body.metadata === 'object' ? body.metadata : {},
@@ -515,6 +651,7 @@ async function handleCreateRequirementDraft(req, res) {
 
   requirementState.drafts[id] = draft;
   persistRequirements();
+  const signedSourceLinks = buildSignedSourceLinks(sourceObjectKeys);
   return send(res, 201, {
     created: true,
     draft_id: id,
@@ -523,6 +660,7 @@ async function handleCreateRequirementDraft(req, res) {
     change_type: draft.change_type,
     revision_number: draft.revision_number,
     child_task_count: draft.child_tasks.length,
+    signed_source_links: signedSourceLinks,
   });
 }
 
@@ -537,8 +675,9 @@ async function handleListRequirementDrafts(req, res) {
   if (!checkApiKey(req)) return send(res, 401, { error: 'unauthorized' });
   const url = new URL(req.url, 'http://localhost');
   const status = url.searchParams.get('status');
+  const ttl = parseInt(url.searchParams.get('ttl_secs') || String(R2_PRESIGN_EXPIRY_SECS), 10);
   return send(res, 200, {
-    drafts: listRequirementDrafts(status),
+    drafts: listRequirementDrafts(status).map((draft) => withSignedLinks(draft, ttl)),
   });
 }
 
@@ -546,7 +685,27 @@ async function handleGetRequirementDraft(req, res, draftId) {
   if (!checkApiKey(req)) return send(res, 401, { error: 'unauthorized' });
   const draft = requirementState.drafts[draftId];
   if (!draft) return send(res, 404, { error: 'draft not found' });
-  return send(res, 200, draft);
+  const url = new URL(req.url, 'http://localhost');
+  const ttl = parseInt(url.searchParams.get('ttl_secs') || String(R2_PRESIGN_EXPIRY_SECS), 10);
+  return send(res, 200, withSignedLinks(draft, ttl));
+}
+
+async function handleGetRequirementDraftSignedLinks(req, res, draftId) {
+  if (!checkApiKey(req)) return send(res, 401, { error: 'unauthorized' });
+  const draft = requirementState.drafts[draftId];
+  if (!draft) return send(res, 404, { error: 'draft not found' });
+  if (!draft.source_object_keys || !draft.source_object_keys.length) {
+    return send(res, 200, { draft_id: draftId, signed_source_links: [] });
+  }
+  if (!hasR2PresignConfig()) {
+    return send(res, 503, { error: 'R2 signing not configured on ingest service' });
+  }
+  const url = new URL(req.url, 'http://localhost');
+  const ttl = parseInt(url.searchParams.get('ttl_secs') || String(R2_PRESIGN_EXPIRY_SECS), 10);
+  return send(res, 200, {
+    draft_id: draftId,
+    signed_source_links: buildSignedSourceLinks(draft.source_object_keys, ttl),
+  });
 }
 
 async function handleApproveRequirementDraft(req, res, draftId) {
@@ -573,10 +732,12 @@ async function handleApproveRequirementDraft(req, res, draftId) {
   draft.approved_by = approver;
   draft.published = published;
   persistRequirements();
+  const signedSourceLinks = buildSignedSourceLinks(draft.source_object_keys || []);
   return send(res, 200, {
     approved: true,
     draft_id: draft.id,
     ...published,
+    signed_source_links: signedSourceLinks,
   });
 }
 
@@ -700,6 +861,11 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'POST' && action === 'reject') {
         return await handleRejectRequirementDraft(req, res, draftId);
       }
+    }
+    const draftSignedPath = pathname.match(/^\/ingest\/requirements\/drafts\/([0-9a-f-]+)\/signed-source-links$/);
+    if (draftSignedPath && req.method === 'GET') {
+      const [, draftId] = draftSignedPath;
+      return await handleGetRequirementDraftSignedLinks(req, res, draftId);
     }
     return send(res, 404, { error: 'not found' });
   } catch (e) {

@@ -141,6 +141,9 @@ Body:
   "source": {
     "type": "pdf",
     "fingerprint": "req-checkout-v2",
+    "object_keys": [
+      "requirements/checkout-v2.pdf"
+    ],
     "links": [
       "https://r2.example.com/requirements/checkout-v2.pdf"
     ]
@@ -173,6 +176,7 @@ Notes:
 
 - `source.type`: `pdf` | `docx` | `markdown`
 - `source.fingerprint`: stable key used for revision tracking
+- `source.object_keys` (optional): object keys in your private R2 bucket. Ingest stores durable `r2://bucket/key` references and returns short-lived signed links for access.
 - If `child_tasks` are omitted, the service derives tasks from epic acceptance criteria.
 - Child task cap is enforced (`INGEST_MAX_CHILD_TASKS`, default `12`) with one follow-up backlog task when overflow exists.
 - Fresh and revision drafts are both approval-gated.
@@ -192,7 +196,7 @@ Response:
 
 - `200 { "drafts": [...] }`
 
-### Get draft
+### Get draft (includes signed links)
 
 ```
 GET https://vk.rokomari.io/ingest/requirements/drafts/{draft_id}
@@ -202,6 +206,20 @@ Response:
 
 - `200` full draft payload
 - `404` draft not found
+
+### Get fresh signed source links
+
+Use this endpoint when links may have expired.
+
+```
+GET https://vk.rokomari.io/ingest/requirements/drafts/{draft_id}/signed-source-links
+GET https://vk.rokomari.io/ingest/requirements/drafts/{draft_id}/signed-source-links?ttl_secs=300
+```
+
+Response:
+
+- `200 { "draft_id": "...", "signed_source_links": [{ "key":"...", "url":"...", "expires_in_secs":300 }] }`
+- `503` when R2 signing is not configured
 
 ### Approve and publish
 
