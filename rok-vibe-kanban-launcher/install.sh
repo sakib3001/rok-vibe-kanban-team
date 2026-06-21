@@ -69,11 +69,55 @@ sudo env "PATH=${NODE_DIR}:$PATH" "$NPM_BIN" install -g "$ROK_VK_SOURCE"
 # Resolve the absolute bin path so the unit doesn't depend on PATH for ExecStart.
 WRAPPER_LINK="$(command -v rok-vibe-kanban)" || die "rok-vibe-kanban not on PATH after install."
 WRAPPER_BIN="$(readlink -f "$WRAPPER_LINK")"
+WRAPPER_PKG_DIR="$(dirname "$(dirname "$WRAPPER_BIN")")"
 log "Wrapper installed at ${WRAPPER_BIN}"
 
+# Resolve where the pinned vibe-kanban-team package actually lives, using Node's
+# own module resolution from the wrapper. This is robust to npm hoisting (deps
+# at the top level vs nested under the wrapper) AND to `npm i -g <localdir>`
+# symlinking the global package back to this source repo — both of which break
+# naive "<wrapper>/node_modules/vibe-kanban-team" path-guessing.
+resolve_team_root() {
+  "$NODE_BIN" -e '
+const path = require("path");
+const { createRequire } = require("module");
+const req = createRequire(process.argv[1]);
+try {
+  process.stdout.write(path.dirname(req.resolve("vibe-kanban-team/package.json")));
+  process.exit(0);
+} catch (_) {}
+try {
+  const entry = req.resolve("vibe-kanban-team");
+  const marker = path.sep + "node_modules" + path.sep + "vibe-kanban-team" + path.sep;
+  const idx = entry.lastIndexOf(marker);
+  if (idx !== -1) {
+    process.stdout.write(entry.slice(0, idx + marker.length - 1));
+    process.exit(0);
+  }
+} catch (_) {}
+process.exit(1);
+' "$WRAPPER_BIN" 2>/dev/null
+}
+
+TEAM_PKG_DIR="$(resolve_team_root || true)"
+
+# A local global install (npm i -g <dir>) often symlinks the wrapper back to
+# this repo without installing its dependencies. If the client isn't resolvable,
+# install the wrapper's deps next to it and try once more.
+if [ -z "$TEAM_PKG_DIR" ]; then
+  log "vibe-kanban-team not resolvable yet; installing wrapper dependencies in ${WRAPPER_PKG_DIR}..."
+  if [ -w "$WRAPPER_PKG_DIR" ]; then
+    ( cd "$WRAPPER_PKG_DIR" && "$NPM_BIN" install --omit=dev --no-audit --no-fund )
+  else
+    sudo env "PATH=${NODE_DIR}:$PATH" "$NPM_BIN" install --omit=dev --no-audit --no-fund --prefix "$WRAPPER_PKG_DIR"
+  fi
+  TEAM_PKG_DIR="$(resolve_team_root || true)"
+fi
+
+[ -n "$TEAM_PKG_DIR" ] || die "Could not locate vibe-kanban-team after install (searched from ${WRAPPER_BIN}). Try: (cd '${WRAPPER_PKG_DIR}' && npm install) then re-run."
+log "Pinned client resolved at ${TEAM_PKG_DIR}"
+
 # Patch the bundled vibe-kanban-team binary host to our R2 domain.
-WRAPPER_PKG_DIR="$(dirname "$(dirname "$WRAPPER_BIN")")"
-TEAM_PKG_DIR="${WRAPPER_PKG_DIR}/node_modules/vibe-kanban-team"
 if [ -d "$TEAM_PKG_DIR" ]; then
   log "Patching binary host in ${TEAM_PKG_DIR}"
   sudo "$NODE_BIN" -e '
