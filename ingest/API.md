@@ -294,11 +294,11 @@ Behavior:
 
 - Publishes epic + child tasks to Vibe Kanban.
 - If the source fingerprint already maps to an existing epic, that epic is updated and a new revision is recorded.
-- Child tasks are created as subtasks under the epic.
+- Existing child tasks are reused/updated by position; extra old tasks are marked superseded.
 
 Response:
 
-- `200 { "approved": true, "epic_issue_id": "...", "child_issues": [...] }`
+- `200 { "approved": true, "epic_issue_id": "...", "child_issues": [...], "superseded_child_issues": [...] }`
 
 ### Reject draft
 

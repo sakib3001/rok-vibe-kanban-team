@@ -670,21 +670,111 @@ async function createChildTask(epicId, task, sourceLinks) {
   return result;
 }
 
+async function updateIssueFields(issueId, changes) {
+  const res = await authed('/v1/issues/bulk', {
+    method: 'POST',
+    body: {
+      updates: [{ id: issueId, ...changes }],
+    },
+  });
+  if (!res.ok) {
+    throw new Error(`update issue failed: HTTP ${res.status} ${await res.text()}`);
+  }
+  const payload = await res.json();
+  return payload?.data?.[0] || null;
+}
+
+async function fetchIssue(issueId) {
+  const res = await authed(`/v1/issues/${encodeURIComponent(issueId)}`);
+  if (!res.ok) return null;
+  const body = await res.json();
+  return body?.data || body || null;
+}
+
+async function updateChildTask(issueId, epicId, task, sourceLinks, revisionNumber) {
+  const updated = await updateIssueFields(issueId, {
+    title: task.title,
+    description: buildTaskDescription(task, sourceLinks),
+    priority: task.priority || null,
+    parent_issue_id: epicId,
+    extension_metadata: {
+      source: 'ingest-agent-centric-child',
+      revision_number: revisionNumber,
+      superseded: false,
+    },
+  });
+  const result = { id: issueId, reused: true, updated: Boolean(updated) };
+  if (task.assignee) {
+    result.assignee = await tryAssign(issueId, task.assignee);
+  }
+  return result;
+}
+
+async function supersedeChildTask(issueId, revisionNumber) {
+  const existing = await fetchIssue(issueId);
+  const oldTitle = String(existing?.title || issueId);
+  const oldDescription = String(existing?.description || '').trim();
+  const supersededTitle = oldTitle.startsWith('[Superseded')
+    ? oldTitle
+    : `[Superseded v${revisionNumber}] ${oldTitle}`;
+  const suffix = `\n\n---\nSuperseded by requirement revision v${revisionNumber}.`;
+  const supersededDescription = oldDescription.includes('Superseded by requirement revision')
+    ? oldDescription
+    : `${oldDescription}${suffix}`.trim();
+  await updateIssueFields(issueId, {
+    title: supersededTitle,
+    description: supersededDescription,
+    extension_metadata: {
+      source: 'ingest-agent-centric-child',
+      revision_number: revisionNumber,
+      superseded: true,
+    },
+  });
+  return { id: issueId, superseded: true };
+}
+
 async function publishRequirementDraft(draft) {
+  const sourceState = requirementState.source_index[draft.source_fingerprint] || {};
   const epicIssueId = await upsertEpicForDraft(draft);
-  const childIssueIds = [];
-  for (const task of draft.child_tasks) {
+  const existingChildIds = Array.isArray(sourceState.child_issue_ids)
+    ? sourceState.child_issue_ids.map((id) => String(id))
+    : [];
+  const childIssueResults = [];
+  for (let i = 0; i < draft.child_tasks.length; i += 1) {
+    const task = draft.child_tasks[i];
+    if (existingChildIds[i]) {
+      const updated = await updateChildTask(
+        existingChildIds[i],
+        epicIssueId,
+        task,
+        draft.source_links,
+        draft.revision_number
+      );
+      childIssueResults.push(updated);
+      continue;
+    }
     const created = await createChildTask(epicIssueId, task, draft.source_links);
-    childIssueIds.push(created);
+    childIssueResults.push(created);
+  }
+  const staleChildIds = existingChildIds.slice(draft.child_tasks.length);
+  const supersededChildIssues = [];
+  for (const staleId of staleChildIds) {
+    const superseded = await supersedeChildTask(staleId, draft.revision_number);
+    supersededChildIssues.push(superseded);
   }
   requirementState.source_index[draft.source_fingerprint] = {
     epic_issue_id: epicIssueId,
+    child_issue_ids: childIssueResults.map((item) => item.id),
     last_revision_number: draft.revision_number,
     last_published_draft_id: draft.id,
     last_published_at: new Date().toISOString(),
   };
   persistRequirements();
-  return { epic_issue_id: epicIssueId, child_issues: childIssueIds };
+  return {
+    epic_issue_id: epicIssueId,
+    child_issues: childIssueResults,
+    superseded_child_issues: supersededChildIssues,
+  };
 }
 
 async function handleCreateRequirementDraft(req, res) {

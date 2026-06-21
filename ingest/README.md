@@ -49,7 +49,7 @@ Responses: `201 {created:true, id, url}` · `200 {deduped:true, id}` (dedup_key 
 1. Agent submits requirement draft to `POST /ingest/requirements/drafts`.
 2. Human reviews via `GET /ingest/requirements/drafts` or `GET /ingest/requirements/drafts/{id}`.
 3. Human explicitly approves: `POST /ingest/requirements/drafts/{id}/approve`.
-4. Ingest publishes epic + child tasks.
+4. Ingest publishes epic + child tasks (revisions reuse/update existing child tasks; extra old tasks are marked superseded).
 5. Reject path: `POST /ingest/requirements/drafts/{id}/reject`.
 6. For private R2 source files, fetch fresh access links via `GET /ingest/requirements/drafts/{id}/signed-source-links`.
 
