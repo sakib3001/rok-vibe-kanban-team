@@ -11,7 +11,8 @@
 //               INGEST_MAX_BODY_KB(2048), INGEST_MAX_CHILD_TASKS(12),
 //               R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_REVIEW_ENDPOINT,
 //               R2_REVIEW_BUCKET, R2_PRESIGN_EXPIRY_SECS(300),
-//               INGEST_UPLOAD_MAX_MB(20), R2_REGION(auto)
+//               INGEST_UPLOAD_MAX_MB(20), R2_REGION(auto),
+//               INGEST_MEMORY_URL(http://memory:8091), INGEST_MEMORY_API_KEY
 
 const http = require('node:http');
 const fs = require('node:fs');
@@ -43,6 +44,8 @@ const R2_BUCKET = process.env.R2_REVIEW_BUCKET || '';
 const R2_REGION = process.env.R2_REGION || 'auto';
 const R2_PRESIGN_EXPIRY_SECS = parseInt(process.env.R2_PRESIGN_EXPIRY_SECS || '300', 10) || 300;
 const UPLOAD_LIMIT_BYTES = (parseInt(process.env.INGEST_UPLOAD_MAX_MB || '20', 10) || 20) * 1024 * 1024;
+const MEMORY_URL = (process.env.INGEST_MEMORY_URL || 'http://memory:8091').replace(/\/+$/, '');
+const MEMORY_API_KEY = process.env.INGEST_MEMORY_API_KEY || '';
 // Server expects lowercase enum variants: urgent | high | medium | low.
 const PRIORITIES = { urgent: 'urgent', high: 'high', medium: 'medium', low: 'low' };
 const SOURCE_TYPES = new Set(['pdf', 'docx', 'markdown']);
@@ -336,6 +339,44 @@ function withSignedLinks(draft, ttlSecs = R2_PRESIGN_EXPIRY_SECS) {
     ...draft,
     signed_source_links: buildSignedSourceLinks(draft.source_object_keys || [], ttlSecs),
   };
+}
+
+function hasMemoryIngestConfig() {
+  return Boolean(MEMORY_URL && MEMORY_API_KEY);
+}
+
+async function memoryRpc(pathname, body) {
+  if (!hasMemoryIngestConfig()) {
+    return { skipped: true, reason: 'memory ingest not configured' };
+  }
+  try {
+    const res = await fetch(`${MEMORY_URL}${pathname}`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-api-key': MEMORY_API_KEY,
+      },
+      body: JSON.stringify(body),
+    });
+    const raw = await res.text();
+    let json;
+    try {
+      json = raw ? JSON.parse(raw) : {};
+    } catch {
+      json = { raw };
+    }
+    return {
+      ok: res.ok,
+      status: res.status,
+      body: json,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      status: 0,
+      body: { error: error.message },
+    };
+  }
 }
 
 async function rpc(pathname, { method = 'GET', token, body } = {}) {
@@ -964,17 +1005,33 @@ async function handleApproveRequirementDraft(req, res, draftId) {
   }
 
   const published = await publishRequirementDraft(draft);
+  const signedSourceLinks = buildSignedSourceLinks(draft.source_object_keys || []);
+  const memoryPayload = {
+    org_id: ORG_ID || undefined,
+    project_id: PROJECT_ID || undefined,
+    actor: `ingest-approval:${draftId}`,
+    source_fingerprint: draft.source_fingerprint,
+    source_type: draft.source_type,
+    revision_number: draft.revision_number,
+    epic: draft.epic,
+    child_tasks: draft.child_tasks,
+    source_links: draft.source_links,
+    signed_source_links: signedSourceLinks,
+    published,
+  };
+  const memoryIngest = await memoryRpc('/memory/ingest/requirements', memoryPayload);
   draft.status = 'published';
   draft.approved_at = new Date().toISOString();
   draft.approved_by = approver;
   draft.published = published;
+  draft.memory_ingest = memoryIngest;
   persistRequirements();
-  const signedSourceLinks = buildSignedSourceLinks(draft.source_object_keys || []);
   return send(res, 200, {
     approved: true,
     draft_id: draft.id,
     ...published,
     signed_source_links: signedSourceLinks,
+    memory_ingest: memoryIngest,
   });
 }
 

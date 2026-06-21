@@ -295,10 +295,11 @@ Behavior:
 - Publishes epic + child tasks to Vibe Kanban.
 - If the source fingerprint already maps to an existing epic, that epic is updated and a new revision is recorded.
 - Existing child tasks are reused/updated by position; extra old tasks are marked superseded.
+- If memory integration is configured, approved requirement content is pushed to `/memory/ingest/requirements`.
 
 Response:
 
-- `200 { "approved": true, "epic_issue_id": "...", "child_issues": [...], "superseded_child_issues": [...] }`
+- `200 { "approved": true, "epic_issue_id": "...", "child_issues": [...], "superseded_child_issues": [...], "memory_ingest": {...} }`
 
 ### Reject draft
 

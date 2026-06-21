@@ -20,7 +20,19 @@ Small sidecar service for organization memory retrieval and ingestion.
 - `POST /memory/project_brief`
 - `POST /memory/ingest/docs`
 - `POST /memory/ingest/issues`
+- `POST /memory/ingest/requirements`
 - `POST /memory/reembed`  (`{"only_missing":true}` to heal null-embedding rows)
+
+### Requirement ingestion payload (summary)
+
+`POST /memory/ingest/requirements` expects:
+
+- `org_id`, `project_id?`
+- `source_fingerprint`, `revision_number`, `source_type`
+- `epic` (`title`, `summary`, `acceptance_criteria[]`)
+- `child_tasks[]`
+- `source_links[]`, `signed_source_links[]` (for optional markdown/txt source extraction)
+- `published` (epic/child issue ids)
 - `POST /memory/retention`  (soft-delete noisy types past window; purge old soft-deletes)
 
 ## MCP mode

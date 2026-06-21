@@ -696,6 +696,217 @@ async function ingestIssueNotes({
   return { ingested, org_id };
 }
 
+function buildRequirementEpicContent(payload) {
+  const lines = [
+    `# Requirement ${payload.source_fingerprint} v${payload.revision_number}`,
+    '',
+    `## Epic`,
+    payload.epic?.title || '',
+    '',
+    `## Summary`,
+    payload.epic?.summary || '',
+    '',
+    `## Acceptance Criteria`,
+    ...(Array.isArray(payload.epic?.acceptance_criteria) && payload.epic.acceptance_criteria.length
+      ? payload.epic.acceptance_criteria.map((x) => `- ${x}`)
+      : ['- (none provided)']),
+  ];
+  if (Array.isArray(payload.source_links) && payload.source_links.length) {
+    lines.push('', '## Source Links', ...payload.source_links.map((x) => `- ${x}`));
+  }
+  if (payload.published?.epic_issue_id) {
+    lines.push('', `## Published Epic`, `- issue_id: ${payload.published.epic_issue_id}`);
+  }
+  return lines.join('\n');
+}
+
+function buildRequirementTaskContent(payload, task, index) {
+  const lines = [
+    `# Requirement Task ${index + 1}`,
+    '',
+    `## Title`,
+    task.title || '',
+    '',
+    `## Objective`,
+    task.objective || '',
+    '',
+    `## Acceptance Criteria`,
+    ...(Array.isArray(task.acceptance_criteria) && task.acceptance_criteria.length
+      ? task.acceptance_criteria.map((x) => `- ${x}`)
+      : ['- (none provided)']),
+  ];
+  if (task.priority) {
+    lines.push('', `## Priority`, String(task.priority));
+  }
+  if (task.assignee) {
+    lines.push('', `## Assignee`, String(task.assignee));
+  }
+  if (Array.isArray(payload.source_links) && payload.source_links.length) {
+    lines.push('', '## Source Links', ...payload.source_links.map((x) => `- ${x}`));
+  }
+  return lines.join('\n');
+}
+
+async function fetchTextFromSignedSource(link) {
+  try {
+    const url = new URL(link.url || '');
+    const pathname = url.pathname.toLowerCase();
+    if (!(pathname.endsWith('.md') || pathname.endsWith('.markdown') || pathname.endsWith('.txt'))) {
+      return null;
+    }
+    const res = await fetch(link.url);
+    if (!res.ok) return null;
+    const text = await res.text();
+    return {
+      key: link.key,
+      text: redactSecrets(text),
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function ingestRequirements({
+  org_id = MEMORY_DEFAULT_ORG_ID,
+  project_id = null,
+  actor = 'memory-ingest-requirements',
+  source_fingerprint,
+  source_type = 'markdown',
+  revision_number,
+  epic,
+  child_tasks = [],
+  source_links = [],
+  signed_source_links = [],
+  published = null,
+}) {
+  if (!org_id) throw new Error('org_id is required');
+  if (!source_fingerprint) throw new Error('source_fingerprint is required');
+  if (!revision_number) throw new Error('revision_number is required');
+  if (!epic || !epic.title || !epic.summary) {
+    throw new Error('epic.title and epic.summary are required');
+  }
+
+  const docs = [];
+  const revisionTag = `revision:v${revision_number}`;
+  const baseTags = ['requirement', String(source_type || 'unknown'), String(source_fingerprint), revisionTag];
+
+  const epicContent = buildRequirementEpicContent({
+    source_fingerprint,
+    revision_number,
+    epic,
+    source_links,
+    published,
+  });
+  docs.push({
+    source_ref: `req:${source_fingerprint}:v${revision_number}:epic`,
+    title: epic.title,
+    summary: epic.summary.slice(0, 280),
+    content: redactSecrets(epicContent),
+    source_type: 'decision',
+    tags: [...baseTags, 'epic'],
+    content_hash: crypto.createHash('sha256').update(epicContent).digest('hex'),
+  });
+
+  for (let i = 0; i < child_tasks.length; i += 1) {
+    const task = child_tasks[i];
+    const taskContent = buildRequirementTaskContent(
+      {
+        source_fingerprint,
+        revision_number,
+        source_links,
+      },
+      task,
+      i
+    );
+    docs.push({
+      source_ref: `req:${source_fingerprint}:v${revision_number}:task:${i + 1}`,
+      title: task.title || `${epic.title} Task ${i + 1}`,
+      summary: String(task.objective || task.title || '').slice(0, 280),
+      content: redactSecrets(taskContent),
+      source_type: 'decision',
+      tags: [...baseTags, 'task'],
+      content_hash: crypto.createHash('sha256').update(taskContent).digest('hex'),
+    });
+  }
+
+  let textSourceCount = 0;
+  if (Array.isArray(signed_source_links)) {
+    for (let i = 0; i < signed_source_links.length; i += 1) {
+      const extracted = await fetchTextFromSignedSource(signed_source_links[i]);
+      if (!extracted || !extracted.text.trim()) continue;
+      const chunks = chunkText(extracted.text);
+      for (let j = 0; j < chunks.length; j += 1) {
+        const content = chunks[j];
+        docs.push({
+          source_ref: `req:${source_fingerprint}:v${revision_number}:source:${i + 1}:chunk:${j + 1}`,
+          title: `${epic.title} source ${path.basename(extracted.key || `#${i + 1}`)}`,
+          summary: content.slice(0, 280),
+          content,
+          source_type: 'decision',
+          tags: [...baseTags, 'source_text'],
+          content_hash: crypto.createHash('sha256').update(content).digest('hex'),
+        });
+      }
+      textSourceCount += 1;
+    }
+  }
+
+  // Keep idempotency by source_ref + content_hash; unchanged rows are skipped.
+  let existing = { rows: [] };
+  if (docs.length) {
+    existing = await db.query(
+      `SELECT source_ref, content_hash FROM memory_records
+       WHERE org_id = $1 AND source_ref = ANY($2) AND deleted_at IS NULL`,
+      [org_id, docs.map((d) => d.source_ref)]
+    );
+  }
+  const existingHash = new Map(existing.rows.map((r) => [r.source_ref, r.content_hash]));
+  const changed = docs.filter((d) => existingHash.get(d.source_ref) !== d.content_hash);
+  const skipped = docs.length - changed.length;
+
+  let embeddings = [];
+  let degraded = false;
+  try {
+    embeddings = await embedTexts(changed.map((x) => x.content));
+  } catch (error) {
+    degraded = true;
+    log(`embedder unavailable during requirements ingest; storing keyword-only records (${error.message})`);
+    embeddings = new Array(changed.length).fill(null);
+  }
+
+  let written = 0;
+  for (let i = 0; i < changed.length; i += 1) {
+    await upsertMemoryRecord({
+      id: randomUUID(),
+      org_id,
+      project_id,
+      source_type: changed[i].source_type,
+      source_ref: changed[i].source_ref,
+      title: changed[i].title,
+      summary: changed[i].summary,
+      content: changed[i].content,
+      content_hash: changed[i].content_hash,
+      tags: changed[i].tags,
+      actors: [],
+      visibility: project_id ? 'project' : 'org',
+      confidence: degraded ? 0.45 : 0.82,
+      embed_model: degraded ? '' : `${EMBED_PROVIDER}:${EMBED_MODEL}`,
+      embed_dim: degraded ? 0 : EMBED_DIMENSIONS,
+      embedding: embeddings[i],
+    }, actor);
+    written += 1;
+  }
+
+  return {
+    ingested: written,
+    skipped,
+    source_fingerprint,
+    revision_number,
+    text_sources_ingested: textSourceCount,
+    degraded,
+  };
+}
+
 async function reembedAll({ actor = 'memory-reembed', only_missing = false }) {
   // only_missing heals rows ingested while the embedder was down (embedding IS NULL)
   // without re-embedding the whole corpus.
@@ -828,6 +1039,9 @@ async function handleApi(req, res, pathname) {
     }
     if (pathname === '/memory/ingest/issues' && req.method === 'POST') {
       return send(res, 200, await ingestIssueNotes(body));
+    }
+    if (pathname === '/memory/ingest/requirements' && req.method === 'POST') {
+      return send(res, 200, await ingestRequirements(body));
     }
     if (pathname === '/memory/reembed' && req.method === 'POST') {
       return send(res, 200, await reembedAll(body));

@@ -52,6 +52,7 @@ Responses: `201 {created:true, id, url}` · `200 {deduped:true, id}` (dedup_key 
 4. Ingest publishes epic + child tasks (revisions reuse/update existing child tasks; extra old tasks are marked superseded).
 5. Reject path: `POST /ingest/requirements/drafts/{id}/reject`.
 6. For private R2 source files, fetch fresh access links via `GET /ingest/requirements/drafts/{id}/signed-source-links`.
+7. If configured, ingest auto-pushes approved requirements into memory via `/memory/ingest/requirements`.
 
 For payloads and examples, see [`API.md`](./API.md).
 
@@ -134,6 +135,8 @@ docker compose logs -f ingest        # expect "service account logged in" + "def
 | `R2_REGION` | | `auto` | AWS signing region for R2 |
 | `R2_PRESIGN_EXPIRY_SECS` | | `300` | signed link expiry (seconds) |
 | `INGEST_UPLOAD_MAX_MB` | | `20` | max upload body size for source uploads |
+| `INGEST_MEMORY_URL` | | `http://memory:8091` | memory sidecar base URL for approved requirement ingestion |
+| `INGEST_MEMORY_API_KEY` | | empty | API key for memory sidecar (`/memory/*`) |
 
 ## Notes
 - **Dedup** is by `dedup_key`, persisted to a volume; omit the key to always create a new issue.

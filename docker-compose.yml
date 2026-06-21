@@ -171,6 +171,8 @@ services:
       R2_REGION: ${R2_REGION:-auto}
       R2_PRESIGN_EXPIRY_SECS: ${R2_PRESIGN_EXPIRY_SECS:-300}
       INGEST_UPLOAD_MAX_MB: ${INGEST_UPLOAD_MAX_MB:-20}
+      INGEST_MEMORY_URL: ${INGEST_MEMORY_URL:-http://memory:8091}
+      INGEST_MEMORY_API_KEY: ${INGEST_MEMORY_API_KEY:-${MEMORY_API_KEY:-}}
     volumes:
       - ingest_data:/data
     networks: [internal]
