@@ -43,6 +43,9 @@ Responses: `201 {created:true, id, url}` · `200 {deduped:true, id}` (dedup_key 
 
 ### Agent-centric requirement workflow (new)
 
+0. (Optional) Upload source file through ingest:
+   - `PUT /ingest/requirements/sources/{object_key}` (raw bytes), or
+   - `POST /ingest/requirements/sources/upload` (multipart form).
 1. Agent submits requirement draft to `POST /ingest/requirements/drafts`.
 2. Human reviews via `GET /ingest/requirements/drafts` or `GET /ingest/requirements/drafts/{id}`.
 3. Human explicitly approves: `POST /ingest/requirements/drafts/{id}/approve`.
@@ -128,7 +131,9 @@ docker compose logs -f ingest        # expect "service account logged in" + "def
 | `INGEST_MAX_CHILD_TASKS` | | `12` | max auto-published child tasks per epic draft |
 | `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | for private sources | — | needed to generate signed URLs for `source.object_keys` |
 | `R2_REVIEW_ENDPOINT` / `R2_REVIEW_BUCKET` | for private sources | — | endpoint + bucket used for source-link signing |
+| `R2_REGION` | | `auto` | AWS signing region for R2 |
 | `R2_PRESIGN_EXPIRY_SECS` | | `300` | signed link expiry (seconds) |
+| `INGEST_UPLOAD_MAX_MB` | | `20` | max upload body size for source uploads |
 
 ## Notes
 - **Dedup** is by `dedup_key`, persisted to a volume; omit the key to always create a new issue.

@@ -8,6 +8,8 @@ There are now two ingestion modes:
 1. **Direct issue mode** (existing): `POST /ingest/issues` creates an issue immediately.
 2. **Agent-centric requirement mode** (new): create a draft, require human approval, then publish epic + child tasks.
 
+For private source files, ingest also supports direct upload to R2 (PUT or multipart).
+
 ## Endpoint
 
 ```
@@ -220,6 +222,61 @@ Response:
 
 - `200 { "draft_id": "...", "signed_source_links": [{ "key":"...", "url":"...", "expires_in_secs":300 }] }`
 - `503` when R2 signing is not configured
+
+### Upload source file (PUT raw body)
+
+Upload file bytes directly through ingest to private R2.
+
+```
+PUT https://vk.rokomari.io/ingest/requirements/sources/{object_key}
+```
+
+Example:
+
+```bash
+curl -X PUT "https://vk.rokomari.io/ingest/requirements/sources/requirements/checkout-v2.pdf" \
+  -H "X-API-Key: $KEY" \
+  -H "Content-Type: application/pdf" \
+  --data-binary "@checkout-v2.pdf"
+```
+
+Response:
+
+```json
+{
+  "uploaded": true,
+  "object_key": "requirements/checkout-v2.pdf",
+  "durable_uri": "r2://<bucket>/requirements/checkout-v2.pdf",
+  "signed_get_url": "https://...X-Amz-Signature=...",
+  "expires_in_secs": 300,
+  "size_bytes": 123456,
+  "content_type": "application/pdf"
+}
+```
+
+### Upload source file (multipart form)
+
+```
+POST https://vk.rokomari.io/ingest/requirements/sources/upload
+Content-Type: multipart/form-data
+```
+
+Form fields:
+
+- `file` (required)
+- `object_key` (optional)
+- `prefix` (optional; used when `object_key` is not provided)
+
+Example:
+
+```bash
+curl -X POST "https://vk.rokomari.io/ingest/requirements/sources/upload" \
+  -H "X-API-Key: $KEY" \
+  -F "file=@checkout-v2.pdf" \
+  -F "prefix=requirements/srs"
+```
+
+Use returned `object_key` in draft payload as `source.object_keys`.
 
 ### Approve and publish
 

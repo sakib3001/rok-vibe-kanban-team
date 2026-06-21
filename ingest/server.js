@@ -10,7 +10,8 @@
 //               INGEST_REQUIREMENTS_FILE(/data/requirements-drafts.json),
 //               INGEST_MAX_BODY_KB(2048), INGEST_MAX_CHILD_TASKS(12),
 //               R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_REVIEW_ENDPOINT,
-//               R2_REVIEW_BUCKET, R2_PRESIGN_EXPIRY_SECS(300)
+//               R2_REVIEW_BUCKET, R2_PRESIGN_EXPIRY_SECS(300),
+//               INGEST_UPLOAD_MAX_MB(20), R2_REGION(auto)
 
 const http = require('node:http');
 const fs = require('node:fs');
@@ -41,6 +42,7 @@ const R2_ENDPOINT = (process.env.R2_REVIEW_ENDPOINT || '').replace(/\/+$/, '');
 const R2_BUCKET = process.env.R2_REVIEW_BUCKET || '';
 const R2_REGION = process.env.R2_REGION || 'auto';
 const R2_PRESIGN_EXPIRY_SECS = parseInt(process.env.R2_PRESIGN_EXPIRY_SECS || '300', 10) || 300;
+const UPLOAD_LIMIT_BYTES = (parseInt(process.env.INGEST_UPLOAD_MAX_MB || '20', 10) || 20) * 1024 * 1024;
 // Server expects lowercase enum variants: urgent | high | medium | low.
 const PRIORITIES = { urgent: 'urgent', high: 'high', medium: 'medium', low: 'low' };
 const SOURCE_TYPES = new Set(['pdf', 'docx', 'markdown']);
@@ -159,9 +161,13 @@ function signHmac(key, msg, encoding = undefined) {
   return encoding ? h.digest(encoding) : h.digest();
 }
 
-function presignR2ObjectGet(objectKey, expiresSecs = R2_PRESIGN_EXPIRY_SECS) {
+function presignR2Object(method, objectKey, expiresSecs = R2_PRESIGN_EXPIRY_SECS) {
   if (!hasR2PresignConfig()) {
     throw httpErr(503, 'R2 signing not configured on ingest service');
+  }
+  const upperMethod = String(method || 'GET').toUpperCase();
+  if (!['GET', 'PUT'].includes(upperMethod)) {
+    throw httpErr(400, `unsupported presign method: ${upperMethod}`);
   }
   const ttl = Math.max(60, Math.min(3600, parseInt(expiresSecs, 10) || R2_PRESIGN_EXPIRY_SECS));
   const endpoint = new URL(R2_ENDPOINT);
@@ -189,7 +195,7 @@ function presignR2ObjectGet(objectKey, expiresSecs = R2_PRESIGN_EXPIRY_SECS) {
     .join('&');
   const canonicalHeaders = `host:${host}\n`;
   const canonicalRequest = [
-    'GET',
+    upperMethod,
     canonicalUri,
     canonicalQuery,
     canonicalHeaders,
@@ -211,8 +217,105 @@ function presignR2ObjectGet(objectKey, expiresSecs = R2_PRESIGN_EXPIRY_SECS) {
   return `${endpoint.origin}${canonicalUri}?${signedQuery}`;
 }
 
+function presignR2ObjectGet(objectKey, expiresSecs = R2_PRESIGN_EXPIRY_SECS) {
+  return presignR2Object('GET', objectKey, expiresSecs);
+}
+
+function presignR2ObjectPut(objectKey, expiresSecs = R2_PRESIGN_EXPIRY_SECS) {
+  return presignR2Object('PUT', objectKey, expiresSecs);
+}
+
 function buildR2DurableUri(objectKey) {
   return `r2://${R2_BUCKET}/${normalizeObjectKey(objectKey)}`;
+}
+
+function sanitizeFileName(fileName) {
+  const cleaned = String(fileName || '')
+    .trim()
+    .replace(/^.*[\\/]/, '')
+    .replace(/[^a-zA-Z0-9._-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return cleaned || 'source.bin';
+}
+
+function defaultObjectKey(fileName, prefix = 'requirements/uploads') {
+  const d = new Date();
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const id = crypto.randomUUID();
+  const safe = sanitizeFileName(fileName);
+  return `${prefix}/${y}/${m}/${id}-${safe}`;
+}
+
+async function uploadR2Object(objectKey, payloadBuffer, contentType = 'application/octet-stream') {
+  if (!hasR2PresignConfig()) {
+    throw httpErr(503, 'R2 signing not configured on ingest service');
+  }
+  if (!Buffer.isBuffer(payloadBuffer) || !payloadBuffer.length) {
+    throw httpErr(400, 'upload payload is empty');
+  }
+  const cleanKey = normalizeObjectKey(objectKey);
+  const putUrl = presignR2ObjectPut(cleanKey);
+  const res = await fetch(putUrl, {
+    method: 'PUT',
+    headers: {
+      'content-type': contentType || 'application/octet-stream',
+    },
+    body: payloadBuffer,
+  });
+  if (!res.ok) {
+    throw new Error(`R2 upload failed: HTTP ${res.status} ${await res.text()}`);
+  }
+  return {
+    object_key: cleanKey,
+    durable_uri: buildR2DurableUri(cleanKey),
+    signed_get_url: presignR2ObjectGet(cleanKey),
+    expires_in_secs: Math.max(60, Math.min(3600, R2_PRESIGN_EXPIRY_SECS)),
+    size_bytes: payloadBuffer.length,
+    content_type: contentType || 'application/octet-stream',
+  };
+}
+
+function parseMultipartForm(buffer, boundary) {
+  const out = { fields: {}, file: null };
+  const marker = `--${boundary}`;
+  const body = buffer.toString('latin1');
+  const chunks = body.split(marker);
+  for (const chunk of chunks) {
+    const trimmed = chunk.trim();
+    if (!trimmed || trimmed === '--') continue;
+    const normalized = chunk.startsWith('\r\n') ? chunk.slice(2) : chunk;
+    const sep = normalized.indexOf('\r\n\r\n');
+    if (sep < 0) continue;
+    const headerText = normalized.slice(0, sep);
+    let contentText = normalized.slice(sep + 4);
+    if (contentText.endsWith('\r\n')) contentText = contentText.slice(0, -2);
+    const headers = {};
+    for (const line of headerText.split('\r\n')) {
+      const idx = line.indexOf(':');
+      if (idx < 0) continue;
+      const key = line.slice(0, idx).trim().toLowerCase();
+      const value = line.slice(idx + 1).trim();
+      headers[key] = value;
+    }
+    const disposition = headers['content-disposition'] || '';
+    const nameMatch = disposition.match(/name="([^"]+)"/i);
+    if (!nameMatch) continue;
+    const fieldName = nameMatch[1];
+    const fileMatch = disposition.match(/filename="([^"]*)"/i);
+    if (fileMatch) {
+      out.file = {
+        field_name: fieldName,
+        filename: sanitizeFileName(fileMatch[1] || ''),
+        content_type: headers['content-type'] || 'application/octet-stream',
+        buffer: Buffer.from(contentText, 'latin1'),
+      };
+      continue;
+    }
+    out.fields[fieldName] = Buffer.from(contentText, 'latin1').toString('utf8').trim();
+  }
+  return out;
 }
 
 function buildSignedSourceLinks(sourceObjectKeys, ttlSecs = R2_PRESIGN_EXPIRY_SECS) {
@@ -664,6 +767,50 @@ async function handleCreateRequirementDraft(req, res) {
   });
 }
 
+async function handleUploadRequirementSourcePut(req, res, rawObjectPath) {
+  if (!checkApiKey(req)) return send(res, 401, { error: 'unauthorized' });
+  if (!hasR2PresignConfig()) {
+    return send(res, 503, { error: 'R2 signing not configured on ingest service' });
+  }
+  const url = new URL(req.url, 'http://localhost');
+  const objectKey = rawObjectPath
+    ? decodeURIComponent(rawObjectPath)
+    : (url.searchParams.get('object_key') || '').trim();
+  if (!objectKey) {
+    return send(res, 400, { error: 'object key is required in path or object_key query' });
+  }
+  const body = await readBodyBuffer(req, UPLOAD_LIMIT_BYTES);
+  if (!body.length) return send(res, 400, { error: 'empty upload body' });
+  const contentType = req.headers['content-type'] || 'application/octet-stream';
+  const uploaded = await uploadR2Object(objectKey, body, contentType);
+  return send(res, 201, { uploaded: true, ...uploaded });
+}
+
+async function handleUploadRequirementSourceMultipart(req, res) {
+  if (!checkApiKey(req)) return send(res, 401, { error: 'unauthorized' });
+  if (!hasR2PresignConfig()) {
+    return send(res, 503, { error: 'R2 signing not configured on ingest service' });
+  }
+  const contentType = req.headers['content-type'] || '';
+  const m = String(contentType).match(/boundary=([^;]+)/i);
+  if (!m) return send(res, 400, { error: 'multipart boundary is missing' });
+  const boundary = m[1].replace(/^"|"$/g, '');
+  const raw = await readBodyBuffer(req, UPLOAD_LIMIT_BYTES);
+  const parsed = parseMultipartForm(raw, boundary);
+  if (!parsed.file || !parsed.file.buffer || !parsed.file.buffer.length) {
+    return send(res, 400, { error: 'multipart file field is required' });
+  }
+  const explicitKey = parsed.fields.object_key ? String(parsed.fields.object_key).trim() : '';
+  const prefix = parsed.fields.prefix ? String(parsed.fields.prefix).trim() : 'requirements/uploads';
+  const objectKey = explicitKey || defaultObjectKey(parsed.file.filename, prefix);
+  const uploaded = await uploadR2Object(objectKey, parsed.file.buffer, parsed.file.content_type);
+  return send(res, 201, {
+    uploaded: true,
+    filename: parsed.file.filename,
+    ...uploaded,
+  });
+}
+
 function listRequirementDrafts(status) {
   const items = Object.values(requirementState.drafts);
   return items
@@ -776,12 +923,12 @@ function send(res, status, obj) {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
   res.end(body);
 }
-function readBody(req, limit = BODY_LIMIT_BYTES) {
+function readBodyBuffer(req, limit = BODY_LIMIT_BYTES) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
     req.on('data', (c) => {
-      size += c.length; // Buffer length = bytes
+      size += c.length;
       if (size > limit) {
         req.destroy();
         reject(httpErr(413, 'payload too large'));
@@ -789,9 +936,12 @@ function readBody(req, limit = BODY_LIMIT_BYTES) {
       }
       chunks.push(c);
     });
-    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    req.on('end', () => resolve(Buffer.concat(chunks)));
     req.on('error', reject);
   });
+}
+function readBody(req, limit = BODY_LIMIT_BYTES) {
+  return readBodyBuffer(req, limit).then((b) => b.toString('utf8'));
 }
 function checkApiKey(req) {
   const hdr = req.headers['x-api-key'] || (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
@@ -845,6 +995,13 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === 'POST' && pathname === '/ingest/requirements/drafts') {
       return await handleCreateRequirementDraft(req, res);
+    }
+    if (req.method === 'POST' && pathname === '/ingest/requirements/sources/upload') {
+      return await handleUploadRequirementSourceMultipart(req, res);
+    }
+    const sourceUploadPath = pathname.match(/^\/ingest\/requirements\/sources\/(.+)$/);
+    if (sourceUploadPath && req.method === 'PUT') {
+      return await handleUploadRequirementSourcePut(req, res, sourceUploadPath[1]);
     }
     if (req.method === 'GET' && pathname === '/ingest/requirements/drafts') {
       return await handleListRequirementDrafts(req, res);
