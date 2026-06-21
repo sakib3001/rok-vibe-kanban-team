@@ -46,8 +46,11 @@ if [ "$(node_major)" -lt "$NODE_MIN_MAJOR" ]; then
   sudo apt-get install -y nodejs
 fi
 NODE_BIN="$(command -v node)"
+NPM_BIN="$(command -v npm || true)"
 log "Using Node $(node -v) at ${NODE_BIN}"
 [ "$(node_major)" -ge "$NODE_MIN_MAJOR" ] || die "Node is still < ${NODE_MIN_MAJOR} after install."
+[ -n "$NPM_BIN" ] || die "npm not found on PATH for user ${USER}. If using nvm, run 'nvm use <version>' first."
+log "Using npm $(npm -v) at ${NPM_BIN}"
 
 # ---- 2) Install the wrapper globally ---------------------------------------
 if [ -z "$ROK_VK_SOURCE" ]; then
@@ -59,7 +62,7 @@ if [ -z "$ROK_VK_SOURCE" ]; then
     log "Installing wrapper from registry: ${ROK_VK_SOURCE}"
   fi
 fi
-sudo npm install -g "$ROK_VK_SOURCE"
+sudo "$NPM_BIN" install -g "$ROK_VK_SOURCE"
 
 # Resolve the absolute bin path so the unit doesn't depend on PATH for ExecStart.
 WRAPPER_LINK="$(command -v rok-vibe-kanban)" || die "rok-vibe-kanban not on PATH after install."
