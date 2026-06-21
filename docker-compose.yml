@@ -76,6 +76,12 @@ services:
       GOOGLE_OAUTH_CLIENT_SECRET: ${GOOGLE_OAUTH_CLIENT_SECRET:-}
       ZOHO_OAUTH_CLIENT_ID: ${ZOHO_OAUTH_CLIENT_ID:-}
       ZOHO_OAUTH_CLIENT_SECRET: ${ZOHO_OAUTH_CLIENT_SECRET:-}
+      # Optional R2-backed storage for issue/source attachments.
+      R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:-}
+      R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:-}
+      R2_REVIEW_ENDPOINT: ${R2_REVIEW_ENDPOINT:-}
+      R2_REVIEW_BUCKET: ${R2_REVIEW_BUCKET:-}
+      R2_PRESIGN_EXPIRY_SECS: ${R2_PRESIGN_EXPIRY_SECS:-300}
       # Phase 0 local validation fallback when OAuth apps are not configured.
       SELF_HOST_LOCAL_AUTH_EMAIL: ${SELF_HOST_LOCAL_AUTH_EMAIL:-}
       SELF_HOST_LOCAL_AUTH_PASSWORD: ${SELF_HOST_LOCAL_AUTH_PASSWORD:-}
@@ -155,6 +161,9 @@ services:
       INGEST_STATUS_NAME: ${INGEST_STATUS_NAME:-todo}
       INGEST_PUBLIC_URL: ${INGEST_PUBLIC_URL:-https://${PUBLIC_DOMAIN}}
       INGEST_DEDUP_FILE: /data/dedup.json
+      INGEST_REQUIREMENTS_FILE: ${INGEST_REQUIREMENTS_FILE:-/data/requirements-drafts.json}
+      INGEST_MAX_BODY_KB: ${INGEST_MAX_BODY_KB:-2048}
+      INGEST_MAX_CHILD_TASKS: ${INGEST_MAX_CHILD_TASKS:-12}
     volumes:
       - ingest_data:/data
     networks: [internal]
