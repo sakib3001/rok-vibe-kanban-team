@@ -53,47 +53,6 @@ Check logs with `journalctl --user -u vibe-kanban -n 50 --no-pager`.
 Useful installer overrides for cross-device environments:
 - `ROK_VK_BINARIES_BASE_URL=https://...` to point at a reachable mirror/binary host.
 - `ROK_VK_SKIP_BINARY_PREFLIGHT=1` to bypass the manifest reachability check.
-- `ROK_VK_CACHE_BUNDLE_PATH=/path/to/rok-vk-cache-v<version>-<platform>.tar.gz` to preload client binaries from a local file.
-- `ROK_VK_CACHE_BUNDLE_URL=https://.../rok-vk-cache-v<version>-<platform>.tar.gz` to preload client binaries from a URL.
-- `ROK_VK_CACHE_BUNDLE_BASE_URL=https://.../bundles` to auto-resolve a version/platform bundle URL.
-- `ROK_VK_AUTO_CACHE_BUNDLE=0` to disable automatic cache-bundle URL probing.
-
-### Offline/cross-device cache bundle (recommended for restricted networks)
-
-On a machine where `rok-vibe-kanban` already runs successfully:
-
-```bash
-cd rok-vibe-kanban-launcher
-./make-cache-bundle.sh
-```
-
-This creates `bundles/rok-vk-cache-v<version>-<platform>.tar.gz` with the pinned
-client cache under `.vibe-kanban/`.
-
-### GitLab-hosted automatic bundle (no extra flags on developer PCs)
-
-Commit the generated tarball(s) to:
-
-`rok-vibe-kanban-launcher/bundles/`
-
-`install.sh` auto-tries:
-
-`https://gitlab.rokomari.club/devops/rok-vibe-kanban/-/raw/main/rok-vibe-kanban-launcher/bundles/rok-vk-cache-v<version>-<platform>.tar.gz`
-
-If found, it preloads binaries automatically. If not found, installer falls back
-to the normal online flow.
-
-Copy/upload that tarball to the target machine, then install with:
-
-```bash
-ROK_VK_CACHE_BUNDLE_PATH=/path/to/rok-vk-cache-v<version>-<platform>.tar.gz ./install.sh
-```
-
-If the target machine can only fetch from HTTP:
-
-```bash
-ROK_VK_CACHE_BUNDLE_URL=https://<host>/rok-vk-cache-v<version>-<platform>.tar.gz ./install.sh
-```
 
 **One-time manual step the service can't do:** authenticate your AI CLI(s) interactively
 once (e.g. run `claude` and sign in). The background service then uses the stored creds.
