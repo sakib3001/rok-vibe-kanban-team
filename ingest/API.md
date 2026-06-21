@@ -3,6 +3,11 @@
 Create issues on the central board (`https://vk.rokomari.io`) by POSTing JSON.
 Hand this file to whoever builds the calling integration.
 
+There are now two ingestion modes:
+
+1. **Direct issue mode** (existing): `POST /ingest/issues` creates an issue immediately.
+2. **Agent-centric requirement mode** (new): create a draft, require human approval, then publish epic + child tasks.
+
 ## Endpoint
 
 ```
@@ -115,3 +120,123 @@ curl -i -X POST $EP -H "X-API-Key: $KEY" -H 'content-type: application/json' -d 
   alerts) so you don't create duplicate issues.
 - Operator/setup details (service account, profiles, deployment) are in
   [README.md](./README.md).
+
+---
+
+## Agent-Centric Requirement Draft API (approval-gated)
+
+This flow is designed for heavier requirement inputs where an agent proposes an epic and
+child tasks, but a human must approve before publishing.
+
+### Create draft
+
+```
+POST https://vk.rokomari.io/ingest/requirements/drafts
+```
+
+Body:
+
+```json
+{
+  "source": {
+    "type": "pdf",
+    "fingerprint": "req-checkout-v2",
+    "links": [
+      "https://r2.example.com/requirements/checkout-v2.pdf"
+    ]
+  },
+  "epic": {
+    "title": "Checkout v2 requirements",
+    "summary": "Implement revised checkout flow with fraud checks and fallback paths.",
+    "acceptance_criteria": [
+      "User can complete payment with saved cards.",
+      "Fraud failure paths are surfaced with clear UI."
+    ]
+  },
+  "child_tasks": [
+    {
+      "title": "Backend payment orchestration",
+      "objective": "Add retry-safe orchestration for providers.",
+      "acceptance_criteria": [
+        "Retries are idempotent.",
+        "Failure reasons are persisted."
+      ],
+      "priority": "High",
+      "assignee": "dev@rokomari.com"
+    }
+  ],
+  "generated_by": "requirements-agent"
+}
+```
+
+Notes:
+
+- `source.type`: `pdf` | `docx` | `markdown`
+- `source.fingerprint`: stable key used for revision tracking
+- If `child_tasks` are omitted, the service derives tasks from epic acceptance criteria.
+- Child task cap is enforced (`INGEST_MAX_CHILD_TASKS`, default `12`) with one follow-up backlog task when overflow exists.
+- Fresh and revision drafts are both approval-gated.
+
+Response:
+
+- `201` with `draft_id`, `change_type` (`new|revision`), `revision_number`
+
+### List drafts
+
+```
+GET https://vk.rokomari.io/ingest/requirements/drafts
+GET https://vk.rokomari.io/ingest/requirements/drafts?status=draft
+```
+
+Response:
+
+- `200 { "drafts": [...] }`
+
+### Get draft
+
+```
+GET https://vk.rokomari.io/ingest/requirements/drafts/{draft_id}
+```
+
+Response:
+
+- `200` full draft payload
+- `404` draft not found
+
+### Approve and publish
+
+```
+POST https://vk.rokomari.io/ingest/requirements/drafts/{draft_id}/approve
+```
+
+Optional body:
+
+```json
+{ "approved_by": "sakib@rokomari.com" }
+```
+
+Behavior:
+
+- Publishes epic + child tasks to Vibe Kanban.
+- If the source fingerprint already maps to an existing epic, that epic is updated and a new revision is recorded.
+- Child tasks are created as subtasks under the epic.
+
+Response:
+
+- `200 { "approved": true, "epic_issue_id": "...", "child_issues": [...] }`
+
+### Reject draft
+
+```
+POST https://vk.rokomari.io/ingest/requirements/drafts/{draft_id}/reject
+```
+
+Optional body:
+
+```json
+{ "reason": "Need clearer acceptance criteria." }
+```
+
+Response:
+
+- `200 { "rejected": true, "draft_id": "..." }`

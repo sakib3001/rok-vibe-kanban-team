@@ -1,8 +1,11 @@
 # Issue-ingestion sidecar
 
-`POST /ingest/issues` → auto-creates an issue on the central server. A small Node service
-(no external deps) that authenticates as a **service account** and calls the existing
-`/v1/issues` API. Enabled via the `ingest` compose profile; routed by Caddy at
+`POST /ingest/issues` → auto-creates an issue on the central server.
+
+`POST /ingest/requirements/drafts` → creates an approval-gated requirement draft (agent-centric flow) that a human must approve before publishing epic + child tasks.
+
+A small Node service (no external deps) that authenticates as a **service account** and calls
+the existing `/v1/issues` API. Enabled via the `ingest` compose profile; routed by Caddy at
 `https://vk.rokomari.io/ingest/*`.
 
 ```
@@ -37,6 +40,16 @@ Responses: `201 {created:true, id, url}` · `200 {deduped:true, id}` (dedup_key 
 `400` (missing title / bad priority / bad JSON) · `401` (bad key) · `502` (upstream create failed).
 
 `GET /health` → `200 {status:"ok"}`.
+
+### Agent-centric requirement workflow (new)
+
+1. Agent submits requirement draft to `POST /ingest/requirements/drafts`.
+2. Human reviews via `GET /ingest/requirements/drafts` or `GET /ingest/requirements/drafts/{id}`.
+3. Human explicitly approves: `POST /ingest/requirements/drafts/{id}/approve`.
+4. Ingest publishes epic + child tasks.
+5. Reject path: `POST /ingest/requirements/drafts/{id}/reject`.
+
+For payloads and examples, see [`API.md`](./API.md).
 
 ### Example
 
@@ -109,8 +122,12 @@ docker compose logs -f ingest        # expect "service account logged in" + "def
 | `INGEST_PUBLIC_URL` | | `https://<PUBLIC_DOMAIN>` | for building issue links in responses |
 | `REMOTE_URL` | | `http://remote:8081` | internal address of the remote API |
 | `INGEST_DEDUP_FILE` | | `/data/dedup.json` | persisted on the `ingest_data` volume |
+| `INGEST_REQUIREMENTS_FILE` | | `/data/requirements-drafts.json` | persisted draft + revision state |
+| `INGEST_MAX_BODY_KB` | | `2048` | max request size for ingest endpoints |
+| `INGEST_MAX_CHILD_TASKS` | | `12` | max auto-published child tasks per epic draft |
 
 ## Notes
 - **Dedup** is by `dedup_key`, persisted to a volume; omit the key to always create a new issue.
 - The single local-auth slot is consumed by the bot — humans still sign in via OAuth.
 - Tokens are obtained via local login and auto-refreshed; on 401 the sidecar refreshes/re-logs in.
+- Requirement drafts are persisted and revisioned by `source.fingerprint`.

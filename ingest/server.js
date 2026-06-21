@@ -6,7 +6,9 @@
 // Required env: INGEST_API_KEY, INGEST_SVC_EMAIL, INGEST_SVC_PASSWORD, INGEST_PROJECT_ID
 // Optional env: INGEST_PORT(8090), REMOTE_URL(http://remote:8081), INGEST_ORG_ID,
 //               INGEST_STATUS_ID, INGEST_STATUS_NAME(todo), INGEST_DEDUP_FILE(/data/dedup.json),
-//               INGEST_DEDUP_TTL_DAYS(30), INGEST_PUBLIC_URL
+//               INGEST_DEDUP_TTL_DAYS(30), INGEST_PUBLIC_URL,
+//               INGEST_REQUIREMENTS_FILE(/data/requirements-drafts.json),
+//               INGEST_MAX_BODY_KB(2048), INGEST_MAX_CHILD_TASKS(12)
 
 const http = require('node:http');
 const fs = require('node:fs');
@@ -28,8 +30,12 @@ const DEDUP_MAX = 10000;
 const STATUS_TTL_MS = 10 * 60 * 1000;
 const MEMBER_TTL_MS = 5 * 60 * 1000;
 const PUBLIC_URL = (process.env.INGEST_PUBLIC_URL || '').replace(/\/+$/, '');
+const REQUIREMENTS_FILE = process.env.INGEST_REQUIREMENTS_FILE || '/data/requirements-drafts.json';
+const BODY_LIMIT_BYTES = (parseInt(process.env.INGEST_MAX_BODY_KB || '2048', 10) || 2048) * 1024;
+const MAX_CHILD_TASKS = parseInt(process.env.INGEST_MAX_CHILD_TASKS || '12', 10) || 12;
 // Server expects lowercase enum variants: urgent | high | medium | low.
 const PRIORITIES = { urgent: 'urgent', high: 'high', medium: 'medium', low: 'low' };
+const SOURCE_TYPES = new Set(['pdf', 'docx', 'markdown']);
 
 // ---- startup validation ----------------------------------------------------
 for (const [k, v] of Object.entries({
@@ -58,6 +64,10 @@ try {
   dedup = {};
 }
 const inFlight = new Set(); // dedup_keys currently being created (race guard)
+let requirementState = {
+  drafts: {},
+  source_index: {},
+};
 
 function persistDedup() {
   try {
@@ -65,6 +75,21 @@ function persistDedup() {
     fs.writeFileSync(DEDUP_FILE, JSON.stringify(dedup));
   } catch (e) {
     console.error(`[ingest] WARN: could not persist dedup store: ${e.message}`);
+  }
+}
+
+try {
+  requirementState = JSON.parse(fs.readFileSync(REQUIREMENTS_FILE, 'utf8')) || requirementState;
+} catch {
+  requirementState = { drafts: {}, source_index: {} };
+}
+
+function persistRequirements() {
+  try {
+    fs.mkdirSync(path.dirname(REQUIREMENTS_FILE), { recursive: true });
+    fs.writeFileSync(REQUIREMENTS_FILE, JSON.stringify(requirementState));
+  } catch (e) {
+    console.error(`[ingest] WARN: could not persist requirements store: ${e.message}`);
   }
 }
 function dedupGet(key) {
@@ -223,6 +248,362 @@ async function createIssue(input) {
   return out;
 }
 
+function toMarkdownList(lines) {
+  if (!Array.isArray(lines) || !lines.length) return '';
+  return lines.map((line) => `- ${String(line).trim()}`).join('\n');
+}
+
+function normalizePriority(priority) {
+  if (!priority) return null;
+  return PRIORITIES[String(priority).trim().toLowerCase()] || null;
+}
+
+function buildEpicDescription({ summary, acceptanceCriteria, sourceLinks, revision }) {
+  const ac = toMarkdownList(acceptanceCriteria);
+  const src = toMarkdownList(sourceLinks);
+  const chunks = [
+    '## Summary',
+    summary || 'No summary provided.',
+  ];
+  if (ac) {
+    chunks.push('', '## Acceptance Criteria', ac);
+  }
+  if (src) {
+    chunks.push('', '## Source Links', src);
+  }
+  chunks.push('', `> Requirement revision: v${revision}`);
+  return chunks.join('\n');
+}
+
+function buildTaskDescription(task, sourceLinks = []) {
+  const objective = String(task.objective || '').trim();
+  const ac = toMarkdownList(task.acceptance_criteria || []);
+  const src = toMarkdownList(sourceLinks);
+  const sections = [];
+  if (objective) {
+    sections.push('## Objective', objective);
+  }
+  if (ac) {
+    sections.push('', '## Acceptance Criteria', ac);
+  }
+  if (src) {
+    sections.push('', '## Source Links', src);
+  }
+  return sections.join('\n') || null;
+}
+
+function capChildTasks(tasks, epicTitle) {
+  if (!Array.isArray(tasks) || !tasks.length) return [];
+  if (tasks.length <= MAX_CHILD_TASKS) return tasks;
+  if (MAX_CHILD_TASKS <= 1) {
+    return [{
+      title: `[Follow-up] Remaining scope for ${epicTitle}`,
+      objective: `Agent found ${tasks.length} tasks; child task cap is ${MAX_CHILD_TASKS}. Review and split manually.`,
+      acceptance_criteria: ['Review deferred scope and create additional tasks if needed.'],
+      priority: 'medium',
+    }];
+  }
+  const selected = tasks.slice(0, MAX_CHILD_TASKS - 1);
+  const remaining = tasks.length - (MAX_CHILD_TASKS - 1);
+  selected.push({
+    title: `[Follow-up] Remaining scope for ${epicTitle}`,
+    objective: `Agent found ${remaining} additional tasks beyond cap (${MAX_CHILD_TASKS}). Review and split manually.`,
+    acceptance_criteria: ['Review deferred scope and create additional tasks if needed.'],
+    priority: 'medium',
+  });
+  return selected;
+}
+
+function deriveTasksFromAc(epicTitle, acceptanceCriteria) {
+  if (!Array.isArray(acceptanceCriteria) || !acceptanceCriteria.length) return [];
+  return acceptanceCriteria.map((item, idx) => ({
+    title: `${epicTitle} - AC ${idx + 1}`,
+    objective: String(item || '').trim(),
+    acceptance_criteria: [String(item || '').trim()],
+  }));
+}
+
+function validateRequirementDraftPayload(body) {
+  if (!body || typeof body !== 'object') return 'body must be an object';
+  if (!body.source || typeof body.source !== 'object') return 'source is required';
+  if (!SOURCE_TYPES.has(String(body.source.type || '').toLowerCase())) {
+    return 'source.type must be one of: pdf|docx|markdown';
+  }
+  if (!body.source.fingerprint || typeof body.source.fingerprint !== 'string') {
+    return 'source.fingerprint is required';
+  }
+  if (!body.epic || typeof body.epic !== 'object') return 'epic is required';
+  if (!body.epic.title || typeof body.epic.title !== 'string') {
+    return 'epic.title is required';
+  }
+  if (!body.epic.summary || typeof body.epic.summary !== 'string') {
+    return 'epic.summary is required';
+  }
+  if (!Array.isArray(body.epic.acceptance_criteria)) {
+    return 'epic.acceptance_criteria must be an array of strings';
+  }
+  if (body.child_tasks !== undefined && !Array.isArray(body.child_tasks)) {
+    return 'child_tasks must be an array when provided';
+  }
+  return null;
+}
+
+async function upsertEpicForDraft(draft) {
+  const sourceState = requirementState.source_index[draft.source_fingerprint];
+  const description = buildEpicDescription({
+    summary: draft.epic.summary,
+    acceptanceCriteria: draft.epic.acceptance_criteria,
+    sourceLinks: draft.source_links,
+    revision: draft.revision_number,
+  });
+  const extensionMetadata = {
+    source: 'ingest-agent-centric',
+    source_type: draft.source_type,
+    source_fingerprint: draft.source_fingerprint,
+    revision_number: draft.revision_number,
+    generated_by: draft.generated_by || null,
+    metadata: draft.metadata || {},
+  };
+
+  if (sourceState?.epic_issue_id) {
+    const res = await authed('/v1/issues/bulk', {
+      method: 'POST',
+      body: {
+        updates: [
+          {
+            id: sourceState.epic_issue_id,
+            title: draft.epic.title,
+            description,
+            extension_metadata: extensionMetadata,
+          },
+        ],
+      },
+    });
+    if (!res.ok) throw new Error(`update epic failed: HTTP ${res.status} ${await res.text()}`);
+    const body = await res.json();
+    return body?.data?.[0]?.id || sourceState.epic_issue_id;
+  }
+
+  const created = await createIssue({
+    title: draft.epic.title,
+    description,
+    dedup_key: null,
+  });
+  const epicId = created.id;
+  const patchRes = await authed('/v1/issues/bulk', {
+    method: 'POST',
+    body: {
+      updates: [
+        {
+          id: epicId,
+          extension_metadata: extensionMetadata,
+        },
+      ],
+    },
+  });
+  if (!patchRes.ok) {
+    throw new Error(`set epic metadata failed: HTTP ${patchRes.status} ${await patchRes.text()}`);
+  }
+  return epicId;
+}
+
+async function createChildTask(epicId, task, sourceLinks) {
+  const payload = {
+    title: task.title,
+    description: buildTaskDescription(task, sourceLinks),
+    priority: task.priority ? String(task.priority) : null,
+  };
+  const created = await createIssue({
+    ...payload,
+    dedup_key: null,
+  });
+  const childId = created.id;
+  const updateRes = await authed('/v1/issues/bulk', {
+    method: 'POST',
+    body: {
+      updates: [
+        {
+          id: childId,
+          parent_issue_id: epicId,
+        },
+      ],
+    },
+  });
+  if (!updateRes.ok) {
+    throw new Error(`set parent issue failed: HTTP ${updateRes.status} ${await updateRes.text()}`);
+  }
+  const result = { id: childId };
+  if (task.assignee) {
+    result.assignee = await tryAssign(childId, task.assignee);
+  }
+  return result;
+}
+
+async function publishRequirementDraft(draft) {
+  const epicIssueId = await upsertEpicForDraft(draft);
+  const childIssueIds = [];
+  for (const task of draft.child_tasks) {
+    const created = await createChildTask(epicIssueId, task, draft.source_links);
+    childIssueIds.push(created);
+  }
+  requirementState.source_index[draft.source_fingerprint] = {
+    epic_issue_id: epicIssueId,
+    last_revision_number: draft.revision_number,
+    last_published_draft_id: draft.id,
+    last_published_at: new Date().toISOString(),
+  };
+  persistRequirements();
+  return { epic_issue_id: epicIssueId, child_issues: childIssueIds };
+}
+
+async function handleCreateRequirementDraft(req, res) {
+  if (!checkApiKey(req)) return send(res, 401, { error: 'unauthorized' });
+  const raw = await readBody(req, BODY_LIMIT_BYTES);
+  let body;
+  try {
+    body = JSON.parse(raw || '{}');
+  } catch {
+    return send(res, 400, { error: 'invalid JSON' });
+  }
+  const validationError = validateRequirementDraftPayload(body);
+  if (validationError) return send(res, 400, { error: validationError });
+
+  const sourceType = String(body.source.type).toLowerCase();
+  const sourceFingerprint = String(body.source.fingerprint).trim();
+  const sourceLinks = Array.isArray(body.source.links) ? body.source.links.map(String) : [];
+  const existing = requirementState.source_index[sourceFingerprint];
+  const revisionNumber = existing ? (existing.last_revision_number || 0) + 1 : 1;
+  const changeType = existing ? 'revision' : 'new';
+  const suppliedTasks = Array.isArray(body.child_tasks) ? body.child_tasks : [];
+  const fallbackTasks = suppliedTasks.length
+    ? suppliedTasks
+    : deriveTasksFromAc(body.epic.title, body.epic.acceptance_criteria);
+  const childTasks = capChildTasks(fallbackTasks, body.epic.title);
+  const now = new Date().toISOString();
+  const id = crypto.randomUUID();
+  const draft = {
+    id,
+    status: 'draft',
+    requires_approval: true,
+    change_type: changeType,
+    created_at: now,
+    source_type: sourceType,
+    source_fingerprint: sourceFingerprint,
+    source_links: sourceLinks,
+    revision_number: revisionNumber,
+    generated_by: body.generated_by || 'agent',
+    metadata: body.metadata && typeof body.metadata === 'object' ? body.metadata : {},
+    epic: {
+      title: String(body.epic.title).trim(),
+      summary: String(body.epic.summary).trim(),
+      acceptance_criteria: body.epic.acceptance_criteria.map((item) => String(item)),
+    },
+    child_tasks: childTasks.map((task, idx) => {
+      const priority = normalizePriority(task.priority);
+      return {
+        id: `${id}-task-${idx + 1}`,
+        title: String(task.title || '').trim(),
+        objective: String(task.objective || '').trim(),
+        acceptance_criteria: Array.isArray(task.acceptance_criteria)
+          ? task.acceptance_criteria.map((item) => String(item))
+          : [],
+        priority,
+        assignee: task.assignee ? String(task.assignee).trim() : null,
+      };
+    }).filter((task) => task.title),
+  };
+
+  requirementState.drafts[id] = draft;
+  persistRequirements();
+  return send(res, 201, {
+    created: true,
+    draft_id: id,
+    status: draft.status,
+    requires_approval: true,
+    change_type: draft.change_type,
+    revision_number: draft.revision_number,
+    child_task_count: draft.child_tasks.length,
+  });
+}
+
+function listRequirementDrafts(status) {
+  const items = Object.values(requirementState.drafts);
+  return items
+    .filter((item) => (!status ? true : item.status === status))
+    .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+}
+
+async function handleListRequirementDrafts(req, res) {
+  if (!checkApiKey(req)) return send(res, 401, { error: 'unauthorized' });
+  const url = new URL(req.url, 'http://localhost');
+  const status = url.searchParams.get('status');
+  return send(res, 200, {
+    drafts: listRequirementDrafts(status),
+  });
+}
+
+async function handleGetRequirementDraft(req, res, draftId) {
+  if (!checkApiKey(req)) return send(res, 401, { error: 'unauthorized' });
+  const draft = requirementState.drafts[draftId];
+  if (!draft) return send(res, 404, { error: 'draft not found' });
+  return send(res, 200, draft);
+}
+
+async function handleApproveRequirementDraft(req, res, draftId) {
+  if (!checkApiKey(req)) return send(res, 401, { error: 'unauthorized' });
+  const draft = requirementState.drafts[draftId];
+  if (!draft) return send(res, 404, { error: 'draft not found' });
+  if (draft.status !== 'draft') {
+    return send(res, 409, { error: `draft is already ${draft.status}` });
+  }
+  let approver = 'human-reviewer';
+  try {
+    const raw = await readBody(req, BODY_LIMIT_BYTES);
+    if (raw) {
+      const body = JSON.parse(raw);
+      if (body.approved_by) approver = String(body.approved_by);
+    }
+  } catch {
+    // Empty/invalid body should not block approval.
+  }
+
+  const published = await publishRequirementDraft(draft);
+  draft.status = 'published';
+  draft.approved_at = new Date().toISOString();
+  draft.approved_by = approver;
+  draft.published = published;
+  persistRequirements();
+  return send(res, 200, {
+    approved: true,
+    draft_id: draft.id,
+    ...published,
+  });
+}
+
+async function handleRejectRequirementDraft(req, res, draftId) {
+  if (!checkApiKey(req)) return send(res, 401, { error: 'unauthorized' });
+  const draft = requirementState.drafts[draftId];
+  if (!draft) return send(res, 404, { error: 'draft not found' });
+  if (draft.status !== 'draft') {
+    return send(res, 409, { error: `draft is already ${draft.status}` });
+  }
+  let reason = null;
+  try {
+    const raw = await readBody(req, BODY_LIMIT_BYTES);
+    if (raw) {
+      const body = JSON.parse(raw);
+      if (body.reason) reason = String(body.reason);
+    }
+  } catch {
+    // Ignore malformed optional reject payload.
+  }
+  draft.status = 'rejected';
+  draft.rejected_at = new Date().toISOString();
+  draft.rejection_reason = reason;
+  persistRequirements();
+  return send(res, 200, { rejected: true, draft_id: draft.id });
+}
+
 // ---- tiny http layer -------------------------------------------------------
 function httpErr(status, message) {
   const e = new Error(message);
@@ -234,7 +615,7 @@ function send(res, status, obj) {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
   res.end(body);
 }
-function readBody(req, limit = 64 * 1024) {
+function readBody(req, limit = BODY_LIMIT_BYTES) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
@@ -300,6 +681,25 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === 'POST' && (pathname === '/ingest/issues' || pathname === '/issues')) {
       return await handleIngest(req, res);
+    }
+    if (req.method === 'POST' && pathname === '/ingest/requirements/drafts') {
+      return await handleCreateRequirementDraft(req, res);
+    }
+    if (req.method === 'GET' && pathname === '/ingest/requirements/drafts') {
+      return await handleListRequirementDrafts(req, res);
+    }
+    const draftPath = pathname.match(/^\/ingest\/requirements\/drafts\/([0-9a-f-]+)(?:\/(approve|reject))?$/);
+    if (draftPath) {
+      const [, draftId, action] = draftPath;
+      if (req.method === 'GET' && !action) {
+        return await handleGetRequirementDraft(req, res, draftId);
+      }
+      if (req.method === 'POST' && action === 'approve') {
+        return await handleApproveRequirementDraft(req, res, draftId);
+      }
+      if (req.method === 'POST' && action === 'reject') {
+        return await handleRejectRequirementDraft(req, res, draftId);
+      }
     }
     return send(res, 404, { error: 'not found' });
   } catch (e) {
