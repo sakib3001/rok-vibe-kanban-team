@@ -32,8 +32,6 @@ const FALLBACK_VERSION = process.env.ROK_VK_VERSION || '0.1.44-20260617110518';
 // Fixed local UI port. Without this the server uses port 0 (random each run).
 // Override with ROK_VK_PORT (or the client's own BACKEND_PORT/PORT).
 const FIXED_PORT = process.env.ROK_VK_PORT || '8154';
-const NON_RETRYABLE_AUTH_EXIT_CODE = 42;
-const AUTH_FAILURE_PATTERN = /Download failed:\s*HTTP\s*401\b.*manifest\.json/i;
 // ===========================================================================
 
 const env = { ...process.env };
@@ -49,44 +47,12 @@ if (!env.BACKEND_PORT && !env.PORT) {
 const args = process.argv.slice(2);
 
 function run(cmd, cmdArgs) {
-  const child = spawn(cmd, cmdArgs, {
-    stdio: ['inherit', 'pipe', 'pipe'],
-    env,
-  });
-  let sawManifestAuthFailure = false;
-  let outputTail = '';
-
-  function forwardAndScan(stream, target) {
-    stream.on('data', (chunk) => {
-      target.write(chunk);
-      const text = chunk.toString();
-      outputTail = (outputTail + text).slice(-8192);
-      if (AUTH_FAILURE_PATTERN.test(text) || AUTH_FAILURE_PATTERN.test(outputTail)) {
-        sawManifestAuthFailure = true;
-      }
-    });
-  }
-
-  if (child.stdout) {
-    forwardAndScan(child.stdout, process.stdout);
-  }
-  if (child.stderr) {
-    forwardAndScan(child.stderr, process.stderr);
-  }
-
+  const child = spawn(cmd, cmdArgs, { stdio: 'inherit', env });
   child.on('exit', (code, signal) => {
     if (signal) {
       process.kill(process.pid, signal);
     } else {
-      const normalizedCode = code == null ? 1 : code;
-      if (normalizedCode !== 0 && sawManifestAuthFailure) {
-        console.error(
-          `[rok-vibe-kanban] non-retryable startup failure: unauthorized binary manifest download ` +
-            `(HTTP 401). Ask the platform team to grant access or publish a public binary bundle.`
-        );
-        process.exit(NON_RETRYABLE_AUTH_EXIT_CODE);
-      }
-      process.exit(normalizedCode);
+      process.exit(code == null ? 1 : code);
     }
   });
   child.on('error', (err) => {

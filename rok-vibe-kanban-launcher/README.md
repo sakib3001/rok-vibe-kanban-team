@@ -32,9 +32,8 @@ cd rok-vibe-kanban-launcher
 It will (idempotently):
 1. Ensure **Node ≥ 20** (installs NodeSource Node 22 if needed — uses `sudo`).
 2. Globally install the pinned wrapper (from this repo pre-publish, or the registry once published).
-3. Preflight-check binary manifest reachability for the pinned `vibe-kanban-team` version.
-4. Write `~/.config/systemd/user/vibe-kanban.service` with the central URL + fixed port.
-5. `loginctl enable-linger` + `systemctl --user enable --now` so it runs at boot.
+3. Write `~/.config/systemd/user/vibe-kanban.service` with the central URL + fixed port.
+4. `loginctl enable-linger` + `systemctl --user enable --now` so it runs at boot.
 
 After install:
 
@@ -45,14 +44,6 @@ After install:
 | Restart / stop | `systemctl --user restart vibe-kanban` / `stop vibe-kanban` |
 | Upgrade | re-run `./install.sh` |
 | Uninstall | `./uninstall.sh` (add `--purge` to also remove local data/credentials) |
-
-If startup fails because the binary host returns `HTTP 401` for `manifest.json`,
-the launcher exits with a non-retryable code and systemd will not crash-loop.
-Check logs with `journalctl --user -u vibe-kanban -n 50 --no-pager`.
-
-Useful installer overrides for cross-device environments:
-- `ROK_VK_BINARIES_BASE_URL=https://...` to point at a reachable mirror/binary host.
-- `ROK_VK_SKIP_BINARY_PREFLIGHT=1` to bypass the manifest reachability check.
 
 **One-time manual step the service can't do:** authenticate your AI CLI(s) interactively
 once (e.g. run `claude` and sign in). The background service then uses the stored creds.
