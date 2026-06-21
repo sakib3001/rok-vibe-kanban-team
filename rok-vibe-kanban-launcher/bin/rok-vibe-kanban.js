@@ -85,21 +85,45 @@ function run(cmd, cmdArgs) {
   });
 }
 
-// Prefer the pinned dependency (single install, deterministic version).
-// Fall back to npx if it isn't resolvable for some reason.
-try {
-  const pkgJsonPath = require.resolve('vibe-kanban-team/package.json');
-  const pkg = require(pkgJsonPath);
+function resolvePinnedClientBin() {
+  // `require.resolve('.../package.json')` can fail when package `exports` does
+  // not expose package.json. Resolve the module entry and derive package root.
+  const entryPath = require.resolve('vibe-kanban-team');
+  const marker = `${path.sep}node_modules${path.sep}vibe-kanban-team${path.sep}`;
+  const markerIdx = entryPath.lastIndexOf(marker);
+  if (markerIdx === -1) {
+    throw new Error(`could not derive vibe-kanban-team root from ${entryPath}`);
+  }
+
+  const pkgRoot = entryPath.slice(0, markerIdx + marker.length - 1);
+  const pkgJsonPath = path.join(pkgRoot, 'package.json');
+  const pkg = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf8'));
   const binField = pkg.bin;
   const binRel =
-    typeof binField === 'string' ? binField : binField[Object.keys(binField)[0]];
-  const binAbs = path.join(path.dirname(pkgJsonPath), binRel);
+    typeof binField === 'string'
+      ? binField
+      : binField && typeof binField === 'object'
+        ? binField[Object.keys(binField)[0]]
+        : null;
+  if (!binRel) {
+    throw new Error('vibe-kanban-team package.json has no bin field');
+  }
+  return {
+    version: pkg.version || 'unknown',
+    binAbs: path.join(pkgRoot, binRel),
+  };
+}
+
+// Prefer the pinned dependency (single install, deterministic version). Fall
+// back to package execution only if resolving the pinned package truly fails.
+try {
+  const pinned = resolvePinnedClientBin();
 
   console.error(
-    `[rok-vibe-kanban] launching vibe-kanban-team@${pkg.version} -> ${env.VK_SHARED_API_BASE} ` +
+    `[rok-vibe-kanban] launching vibe-kanban-team@${pinned.version} -> ${env.VK_SHARED_API_BASE} ` +
       `(local UI on http://127.0.0.1:${env.BACKEND_PORT || env.PORT})`
   );
-  run(process.execPath, [binAbs, ...args]);
+  run(process.execPath, [pinned.binAbs, ...args]);
 } catch (_e) {
   const npxPath = resolveBin('npx');
   const npmPath = resolveBin('npm');

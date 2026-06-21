@@ -73,23 +73,46 @@ log "Wrapper installed at ${WRAPPER_BIN}"
 
 # Patch the bundled vibe-kanban-team binary host to our R2 domain.
 WRAPPER_PKG_DIR="$(dirname "$(dirname "$WRAPPER_BIN")")"
-TEAM_CLI_PATH="${WRAPPER_PKG_DIR}/node_modules/vibe-kanban-team/bin/cli.js"
-if [ -f "$TEAM_CLI_PATH" ]; then
-  log "Patching binary host in ${TEAM_CLI_PATH}"
+TEAM_PKG_DIR="${WRAPPER_PKG_DIR}/node_modules/vibe-kanban-team"
+if [ -d "$TEAM_PKG_DIR" ]; then
+  log "Patching binary host in ${TEAM_PKG_DIR}"
   sudo "$NODE_BIN" -e '
 const fs = require("fs");
-const file = process.argv[1];
+const path = require("path");
+const root = process.argv[1];
 const newUrl = process.argv[2];
-const src = fs.readFileSync(file, "utf8");
-const next = src.replace(/https:\/\/vibe-kanban-binaries\.[^"'\''\s]+/g, newUrl);
-if (next === src && !src.includes(newUrl)) {
-  console.error(`[install] WARN: could not detect binary host URL in ${file}`);
-  process.exit(0);
+const oldHostRe = /https:\/\/vibe-kanban-binaries\.[^"'\''\s]+/g;
+let patchedFiles = 0;
+let visitedJs = 0;
+
+function walk(dir) {
+  for (const name of fs.readdirSync(dir)) {
+    const full = path.join(dir, name);
+    const st = fs.statSync(full);
+    if (st.isDirectory()) {
+      walk(full);
+      continue;
+    }
+    if (!name.endsWith(".js")) continue;
+    visitedJs += 1;
+    const src = fs.readFileSync(full, "utf8");
+    const next = src.replace(oldHostRe, newUrl);
+    if (next !== src) {
+      fs.writeFileSync(full, next);
+      patchedFiles += 1;
+    }
+  }
 }
-fs.writeFileSync(file, next);
-' "$TEAM_CLI_PATH" "$VK_BINARIES_BASE_URL"
+
+walk(root);
+if (patchedFiles === 0) {
+  console.error(`[install] WARN: no JS file required binary host patch under ${root} (scanned ${visitedJs} JS files)`);
+} else {
+  console.log(`[install] patched ${patchedFiles} JS files under ${root}`);
+}
+' "$TEAM_PKG_DIR" "$VK_BINARIES_BASE_URL"
 else
-  warn "Could not find vibe-kanban-team CLI to patch: ${TEAM_CLI_PATH}"
+  warn "Could not find vibe-kanban-team package to patch: ${TEAM_PKG_DIR}"
 fi
 
 # ---- 3) systemd --user unit ------------------------------------------------
