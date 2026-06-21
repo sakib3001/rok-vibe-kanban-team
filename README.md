@@ -14,7 +14,6 @@ downstream patch stack. Deployed via **Docker Compose** (no Helm/Kubernetes).
 | `scripts/publish-npm.sh` | Build/publish the `npx` client wrapper + upload binaries to R2 |
 | `scripts/build-portable-linux.sh` | Rebuild only the linux `vibe-kanban` binary (glibc 2.31) and stage it for R2 |
 | `scripts/Dockerfile.portable-linux` | Builds the linux binaries on Debian bullseye (glibc 2.31) for broad Ubuntu support |
-| `mail-templates/loops/` | Loops transactional email templates (invite / review) |
 
 Notable downstream patches: Zoho OAuth (provider + sign-in buttons), GitLab MRs,
 allowed-email-domains, browser notifications, executor pins, and the remote-web
