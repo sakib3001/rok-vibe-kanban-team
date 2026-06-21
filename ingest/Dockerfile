@@ -1,8 +1,9 @@
-# Issue-ingestion sidecar — tiny Node service, no external deps (uses global fetch).
+# Issue-ingestion sidecar — small Node service (busboy for multipart uploads).
 FROM node:22-alpine
 
 WORKDIR /app
-COPY package.json ./
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
 COPY server.js ./
 
 # Dedup store lives here; create it node-owned so a freshly-created named volume
