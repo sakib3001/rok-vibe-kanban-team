@@ -21,6 +21,10 @@ VK_PORT="${ROK_VK_PORT:-8154}"
 CENTRAL_API_BASE="${VK_SHARED_API_BASE:-https://vk.rokomari.io}"
 BINARIES_BASE_URL="${ROK_VK_BINARIES_BASE_URL:-https://vibe-kanban-binaries.riajul.dev}"
 SKIP_BINARY_PREFLIGHT="${ROK_VK_SKIP_BINARY_PREFLIGHT:-0}"
+CACHE_BUNDLE_PATH="${ROK_VK_CACHE_BUNDLE_PATH:-}"
+CACHE_BUNDLE_URL="${ROK_VK_CACHE_BUNDLE_URL:-}"
+CACHE_BUNDLE_BASE_URL="${ROK_VK_CACHE_BUNDLE_BASE_URL:-https://gitlab.rokomari.club/devops/rok-vibe-kanban/-/raw/main/rok-vibe-kanban-launcher/bundles}"
+AUTO_CACHE_BUNDLE="${ROK_VK_AUTO_CACHE_BUNDLE:-1}"
 NODE_MIN_MAJOR=20
 NODE_INSTALL_MAJOR=22
 # Where to install the wrapper from. Default: this repo if it looks like the
@@ -38,6 +42,30 @@ have() { command -v "$1" >/dev/null 2>&1; }
 have sudo || die "sudo is required (for Node install + global npm install)."
 have systemctl || die "systemd/systemctl is required for user service installation."
 have curl || die "curl is required."
+have tar || die "tar is required."
+
+detect_platform_dir() {
+  local os arch
+  os="$(uname -s)"
+  arch="$(uname -m)"
+
+  case "$os" in
+    Linux) os="linux" ;;
+    Darwin) os="macos" ;;
+    MINGW*|MSYS*|CYGWIN*) os="windows" ;;
+    *) die "Unsupported OS for preloaded cache: ${os}" ;;
+  esac
+
+  case "$arch" in
+    x86_64|amd64) arch="x64" ;;
+    aarch64|arm64) arch="arm64" ;;
+    *)
+      die "Unsupported architecture for preloaded cache: ${arch}"
+      ;;
+  esac
+
+  printf '%s-%s' "$os" "$arch"
+}
 
 # ---- 1) Node >= 20 ---------------------------------------------------------
 node_major() { have node && node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0; }
@@ -69,13 +97,63 @@ WRAPPER_LINK="$(command -v rok-vibe-kanban)" || die "rok-vibe-kanban not on PATH
 WRAPPER_BIN="$(readlink -f "$WRAPPER_LINK")"
 log "Wrapper installed at ${WRAPPER_BIN}"
 
-# ---- 2.5) Preflight: verify binary manifest is reachable --------------------
-if [ "$SKIP_BINARY_PREFLIGHT" != "1" ]; then
-  WRAPPER_PKG_DIR="$(dirname "$(dirname "$WRAPPER_BIN")")"
-  VK_TEAM_VERSION="$(
-    node -e "const p=require(require.resolve('vibe-kanban-team/package.json',{paths:['$WRAPPER_PKG_DIR']}));process.stdout.write(p.version);"
-  )" || die "Could not resolve vibe-kanban-team dependency version for preflight."
+# Resolve pinned client version for both preflight and cache preloading.
+WRAPPER_PKG_DIR="$(dirname "$(dirname "$WRAPPER_BIN")")"
+VK_TEAM_VERSION="$(
+  node -e "const p=require(require.resolve('vibe-kanban-team/package.json',{paths:['$WRAPPER_PKG_DIR']}));process.stdout.write(p.version);"
+)" || die "Could not resolve vibe-kanban-team dependency version."
+VK_BINARY_TAG="v${VK_TEAM_VERSION}"
+VK_PLATFORM_DIR="$(detect_platform_dir)"
+EXPECTED_ZIP="${HOME}/.vibe-kanban/bin/${VK_BINARY_TAG}/${VK_PLATFORM_DIR}/vibe-kanban.zip"
+CACHE_BUNDLE_FILENAME="rok-vk-cache-${VK_BINARY_TAG}-${VK_PLATFORM_DIR}.tar.gz"
 
+if [ -z "$CACHE_BUNDLE_PATH" ] && [ -z "$CACHE_BUNDLE_URL" ] && [ "$AUTO_CACHE_BUNDLE" = "1" ] && [ -n "$CACHE_BUNDLE_BASE_URL" ]; then
+  CACHE_BUNDLE_URL="${CACHE_BUNDLE_BASE_URL%/}/${CACHE_BUNDLE_FILENAME}"
+  AUTO_SELECTED_CACHE_BUNDLE=1
+  log "Auto-selected cache bundle URL: ${CACHE_BUNDLE_URL}"
+else
+  AUTO_SELECTED_CACHE_BUNDLE=0
+fi
+
+# ---- 2.5) Optional cache preload bundle -------------------------------------
+if [ -n "$CACHE_BUNDLE_PATH" ] && [ -n "$CACHE_BUNDLE_URL" ]; then
+  die "Set only one of ROK_VK_CACHE_BUNDLE_PATH or ROK_VK_CACHE_BUNDLE_URL."
+fi
+
+if [ -n "$CACHE_BUNDLE_PATH" ] || [ -n "$CACHE_BUNDLE_URL" ]; then
+  if [ -n "$CACHE_BUNDLE_URL" ]; then
+    TMP_BUNDLE="$(mktemp "/tmp/rok-vk-cache-XXXXXX.tar.gz")"
+    log "Downloading cache bundle from ${CACHE_BUNDLE_URL}"
+    if ! curl -fL "$CACHE_BUNDLE_URL" -o "$TMP_BUNDLE"; then
+      if [ "$AUTO_SELECTED_CACHE_BUNDLE" = "1" ]; then
+        warn "Auto cache bundle download failed; continuing with normal online flow."
+        rm -f "$TMP_BUNDLE" || true
+        TMP_BUNDLE=""
+        BUNDLE_TO_EXTRACT=""
+      else
+        die "Failed to download cache bundle."
+      fi
+    else
+      BUNDLE_TO_EXTRACT="$TMP_BUNDLE"
+    fi
+  else
+    [ -f "$CACHE_BUNDLE_PATH" ] || die "Cache bundle not found: ${CACHE_BUNDLE_PATH}"
+    BUNDLE_TO_EXTRACT="$CACHE_BUNDLE_PATH"
+  fi
+
+  if [ -n "${BUNDLE_TO_EXTRACT:-}" ]; then
+    log "Extracting cache bundle to ${HOME}"
+    tar -xzf "$BUNDLE_TO_EXTRACT" -C "$HOME" || die "Failed to extract cache bundle."
+    if [ -n "${TMP_BUNDLE:-}" ]; then
+      rm -f "$TMP_BUNDLE" || true
+    fi
+  fi
+fi
+
+# ---- 2.6) Preflight: verify binaries are reachable or preloaded -------------
+if [ -f "$EXPECTED_ZIP" ]; then
+  log "Binary cache already available for ${VK_PLATFORM_DIR}: ${EXPECTED_ZIP}"
+elif [ "$SKIP_BINARY_PREFLIGHT" != "1" ]; then
   MANIFEST_URL="${BINARIES_BASE_URL}/binaries/v${VK_TEAM_VERSION}/manifest.json"
   log "Preflight check: ${MANIFEST_URL}"
 
