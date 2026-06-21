@@ -7,7 +7,6 @@
 
 const { spawn } = require('child_process');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 
 // The vibe-kanban client uses modern Node globals (e.g. CustomEvent, added in
@@ -26,9 +25,7 @@ if (NODE_MAJOR < 20) {
 // Central remote server. Override with VK_SHARED_API_BASE only for testing.
 const CENTRAL_API_BASE = 'https://vk.rokomari.io';
 
-// Fallback client version, used only if the pinned dependency cannot be
-// resolved. Keep this in lockstep with the `vibe-kanban-team` version in
-// package.json and with the deployed remote image tag.
+// Fallback client version, used only if explicitly enabled.
 const FALLBACK_VERSION = process.env.ROK_VK_VERSION || '0.1.44-20260617110518';
 
 // Fixed local UI port. Without this the server uses port 0 (random each run).
@@ -86,6 +83,31 @@ function run(cmd, cmdArgs) {
 }
 
 function resolvePinnedClientBin() {
+  // Installer can provide an absolute package root to avoid module-resolution
+  // edge cases in systemd environments.
+  const explicitRoot = process.env.ROK_VK_TEAM_ROOT;
+  if (explicitRoot) {
+    const pkgJsonPath = path.join(explicitRoot, 'package.json');
+    if (!fs.existsSync(pkgJsonPath)) {
+      throw new Error(`ROK_VK_TEAM_ROOT has no package.json: ${explicitRoot}`);
+    }
+    const pkg = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf8'));
+    const binField = pkg.bin;
+    const binRel =
+      typeof binField === 'string'
+        ? binField
+        : binField && typeof binField === 'object'
+          ? binField[Object.keys(binField)[0]]
+          : null;
+    if (!binRel) {
+      throw new Error('vibe-kanban-team package.json has no bin field');
+    }
+    return {
+      version: pkg.version || 'unknown',
+      binAbs: path.join(explicitRoot, binRel),
+    };
+  }
+
   // `require.resolve('.../package.json')` can fail when package `exports` does
   // not expose package.json. Resolve the module entry and derive package root.
   const entryPath = require.resolve('vibe-kanban-team');
@@ -114,8 +136,7 @@ function resolvePinnedClientBin() {
   };
 }
 
-// Prefer the pinned dependency (single install, deterministic version). Fall
-// back to package execution only if resolving the pinned package truly fails.
+// Prefer the pinned dependency (single install, deterministic version).
 try {
   const pinned = resolvePinnedClientBin();
 
@@ -124,7 +145,16 @@ try {
       `(local UI on http://127.0.0.1:${env.BACKEND_PORT || env.PORT})`
   );
   run(process.execPath, [pinned.binAbs, ...args]);
-} catch (_e) {
+} catch (err) {
+  if (env.ROK_VK_ALLOW_NPX_FALLBACK !== '1') {
+    console.error(
+      `[rok-vibe-kanban] pinned client not resolvable; npx fallback disabled.\n` +
+        `  Re-run install.sh to install/patch vibe-kanban-team under @rokomari/vibe-kanban.\n` +
+        `  Root cause: ${err && err.message ? err.message : String(err)}`
+    );
+    process.exit(1);
+  }
+
   const npxPath = resolveBin('npx');
   const npmPath = resolveBin('npm');
   const pkgSpec = `vibe-kanban-team@${FALLBACK_VERSION}`;
@@ -140,13 +170,9 @@ try {
     );
     run(npmPath, ['exec', '--yes', pkgSpec, '--', ...args]);
   } else {
-    const platformHint =
-      os.platform() === 'win32'
-        ? 'Install Node.js with npm, then ensure npm.cmd is on PATH.'
-        : 'Install Node.js with npm, then ensure npm is on PATH (e.g. /usr/bin/npm).';
     console.error(
       `[rok-vibe-kanban] pinned client not resolvable and neither npx nor npm is on PATH.\n` +
-        `  ${platformHint}`
+        `  Install Node.js with npm, then ensure npm is on PATH.`
     );
     process.exit(1);
   }

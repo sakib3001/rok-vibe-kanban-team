@@ -136,6 +136,9 @@ Type=simple
 # Central server + fixed local UI port (see launcher README).
 Environment=VK_SHARED_API_BASE=${CENTRAL_API_BASE}
 Environment=BACKEND_PORT=${VK_PORT}
+Environment=ROK_VK_TEAM_ROOT=${TEAM_PKG_DIR}
+# Keep fallback disabled in production; it can pull an unpatched package.
+Environment=ROK_VK_ALLOW_NPX_FALLBACK=0
 # systemd --user starts with a minimal PATH; add node, global npm bin, and the
 # user-local bin where AI CLIs (claude, etc.) install.
 Environment=PATH=${SYSTEMD_PATH}
