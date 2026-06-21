@@ -20,6 +20,7 @@ DOWNLOAD_SRC_BAK=""
 PKG_JSON_BAK=""
 README_BAK=""
 NPMRC_BAK=""
+PORTABLE_BUILD_DIR=""
 
 cleanup() {
   set +e
@@ -56,6 +57,10 @@ cleanup() {
 
   if [ -n "${TMP_DIR}" ] && [ -d "${TMP_DIR}" ]; then
     rm -rf "${TMP_DIR}"
+  fi
+
+  if [ -n "${PORTABLE_BUILD_DIR}" ] && [ -d "${PORTABLE_BUILD_DIR}" ]; then
+    rm -rf "${PORTABLE_BUILD_DIR}"
   fi
 }
 
@@ -502,7 +507,42 @@ fi
 echo "Using MCP binary target: ${MCP_BIN_TARGET}"
 
 echo "Building backend binaries for ${TARGET_TRIPLE}..."
-if [ "${TARGET_TRIPLE}" = "${HOST_TRIPLE}" ]; then
+# x86_64 linux is built inside Debian bullseye (glibc 2.31) via Docker so the
+# distributed binaries run on Ubuntu 20.04 / 22.04 / 24.04. A native build links
+# the build host's glibc (2.39 on Ubuntu 24.04), which the dynamic loader
+# rejects on older releases ("Command failed" / "GLIBC_2.39 not found").
+# See scripts/Dockerfile.portable-linux. macOS (and any non-x86_64-linux target)
+# keeps the native cargo build below.
+USE_DOCKER_LINUX=0
+if [ "${OS_NAME}" = "Linux" ]; then
+  case "${TARGET_TRIPLE}" in
+    x86_64-*linux*) USE_DOCKER_LINUX=1 ;;
+    *) log "Warning: ${TARGET_TRIPLE} is not x86_64-linux; using native cargo build (binary may not run on older glibc)." ;;
+  esac
+fi
+
+if [ "${USE_DOCKER_LINUX}" = "1" ]; then
+  require_cmd docker
+  echo "Building portable linux binaries in Debian bullseye (glibc 2.31) via Docker..."
+  PORTABLE_IMG="vk-portable-build-$$"
+  DOCKER_BUILDKIT=1 docker build --target builder \
+    -f "${ROOT_DIR}/scripts/Dockerfile.portable-linux" \
+    --build-arg BINS="server ${MCP_BIN_TARGET} review" \
+    --build-arg VITE_PUBLIC_REACT_VIRTUOSO_LICENSE_KEY="${VITE_PUBLIC_REACT_VIRTUOSO_LICENSE_KEY:-}" \
+    --build-arg POSTHOG_API_KEY="${POSTHOG_API_KEY:-}" \
+    --build-arg POSTHOG_API_ENDPOINT="${POSTHOG_API_ENDPOINT:-}" \
+    --build-arg SENTRY_DSN="${SENTRY_DSN:-}" \
+    --build-arg VK_SHARED_API_BASE="${VK_SHARED_API_BASE:-}" \
+    -t "${PORTABLE_IMG}" "${VIBE_DIR}"
+  PORTABLE_BUILD_DIR="$(mktemp -d)"
+  PORTABLE_CID="$(docker create "${PORTABLE_IMG}")"
+  for bin in server "${MCP_BIN_TARGET}" review; do
+    docker cp "${PORTABLE_CID}:/usr/local/bin/${bin}" "${PORTABLE_BUILD_DIR}/${bin}"
+  done
+  docker rm "${PORTABLE_CID}" >/dev/null
+  docker rmi "${PORTABLE_IMG}" >/dev/null 2>&1 || true
+  TARGET_DIR="${PORTABLE_BUILD_DIR}"
+elif [ "${TARGET_TRIPLE}" = "${HOST_TRIPLE}" ]; then
   (cd "${VIBE_DIR}" && cargo build --release --bin server --bin "${MCP_BIN_TARGET}" --bin review)
   TARGET_DIR="${VIBE_DIR}/target/release"
 else

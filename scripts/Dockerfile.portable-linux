@@ -1,17 +1,29 @@
 # syntax=docker/dockerfile:1.6
 #
-# Portable build of the vibe-kanban `server` binary for the R2/npm distribution.
-# Same build path as vibe-kanban/Dockerfile, EXCEPT the Rust builder runs on
-# Debian *bullseye* (glibc 2.31) instead of bookworm (glibc 2.36), so the binary
-# runs on Ubuntu 20.04 / 22.04 / 24.04 (any glibc >= 2.31). We also COPY the
-# whole crates/ tree (the repo Dockerfile's per-crate list is stale) and patches/.
-# Build:  docker build --target builder -f Dockerfile.portable <vibe-kanban-dir>
-# then extract /usr/local/bin/server.
+# Portable linux build of the vibe-kanban backend binaries for the R2/npm
+# distribution. Same build path as vibe-kanban/Dockerfile, EXCEPT the Rust
+# builder runs on Debian *bullseye* (glibc 2.31) instead of bookworm (glibc
+# 2.36), so the resulting binaries run on Ubuntu 20.04 / 22.04 / 24.04 (any
+# glibc >= 2.31). A native build on Ubuntu 24.04 links GLIBC_2.39, which the
+# loader rejects on 22.04/20.04.
+#
+# Differences from vibe-kanban/Dockerfile: builder base bookworm -> bullseye;
+# COPY the whole crates/ tree (the repo Dockerfile's per-crate list is stale);
+# COPY patches/ (needed by pnpm frozen-lockfile); build a configurable set of
+# bins via the BINS arg and stage them under /usr/local/bin.
+#
+# Build (server only):
+#   docker build --target builder -f Dockerfile.portable-linux <vibe-kanban-dir>
+# Build (all distributed bins, e.g. from publish-npm.sh):
+#   docker build --target builder -f Dockerfile.portable-linux \
+#     --build-arg BINS="server vibe-kanban-mcp review" <vibe-kanban-dir>
+# Then extract /usr/local/bin/<bin>.
 
 FROM node:24-alpine AS fe-builder
 
 ARG POSTHOG_API_KEY=""
 ARG POSTHOG_API_ENDPOINT=""
+ARG VITE_PUBLIC_REACT_VIRTUOSO_LICENSE_KEY=""
 
 WORKDIR /app
 
@@ -19,6 +31,7 @@ ENV PNPM_HOME=/pnpm
 ENV PATH=${PNPM_HOME}:${PATH}
 ENV VITE_PUBLIC_POSTHOG_KEY=${POSTHOG_API_KEY}
 ENV VITE_PUBLIC_POSTHOG_HOST=${POSTHOG_API_ENDPOINT}
+ENV VITE_PUBLIC_REACT_VIRTUOSO_LICENSE_KEY=${VITE_PUBLIC_REACT_VIRTUOSO_LICENSE_KEY}
 ENV NODE_OPTIONS=--max-old-space-size=4096
 
 RUN corepack enable
@@ -45,6 +58,7 @@ RUN pnpm -C packages/local-web build
 
 FROM rust:1.93-slim-bullseye AS builder
 
+ARG BINS="server"
 ARG POSTHOG_API_KEY=""
 ARG POSTHOG_API_ENDPOINT=""
 ARG SENTRY_DSN=""
@@ -81,5 +95,7 @@ COPY --from=fe-builder /app/packages/local-web/dist packages/local-web/dist
 RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=cargo-git,target=/usr/local/cargo/git \
     --mount=type=cache,id=workspace-target-bullseye,target=/app/target \
-    cargo build --locked --release --bin server \
- && cp /app/target/release/server /usr/local/bin/server
+    set -eu; \
+    flags=""; for b in ${BINS}; do flags="${flags} --bin ${b}"; done; \
+    cargo build --locked --release ${flags}; \
+    for b in ${BINS}; do cp "/app/target/release/${b}" "/usr/local/bin/${b}"; done
