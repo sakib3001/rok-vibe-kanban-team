@@ -6,6 +6,8 @@
 // Developers run: npx @rokomari/vibe-kanban   (no env, no config)
 
 const { spawn } = require('child_process');
+const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
 // The vibe-kanban client uses modern Node globals (e.g. CustomEvent, added in
@@ -46,6 +48,28 @@ if (!env.BACKEND_PORT && !env.PORT) {
 
 const args = process.argv.slice(2);
 
+function findOnPath(cmd) {
+  const pathValue = process.env.PATH || '';
+  for (const dir of pathValue.split(path.delimiter)) {
+    if (!dir) continue;
+    const candidate = path.join(dir, cmd);
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return candidate;
+    } catch (_e) {
+      // keep scanning PATH
+    }
+  }
+  return null;
+}
+
+function resolveBin(cmd) {
+  if (process.platform === 'win32') {
+    return findOnPath(`${cmd}.cmd`) || findOnPath(`${cmd}.exe`) || findOnPath(cmd);
+  }
+  return findOnPath(cmd);
+}
+
 function run(cmd, cmdArgs) {
   const child = spawn(cmd, cmdArgs, { stdio: 'inherit', env });
   child.on('exit', (code, signal) => {
@@ -77,9 +101,29 @@ try {
   );
   run(process.execPath, [binAbs, ...args]);
 } catch (_e) {
-  console.error(
-    `[rok-vibe-kanban] pinned client not resolvable; falling back to npx vibe-kanban-team@${FALLBACK_VERSION}`
-  );
-  const npxCmd = process.platform === 'win32' ? 'npx.cmd' : 'npx';
-  run(npxCmd, ['-y', `vibe-kanban-team@${FALLBACK_VERSION}`, ...args]);
+  const npxPath = resolveBin('npx');
+  const npmPath = resolveBin('npm');
+  const pkgSpec = `vibe-kanban-team@${FALLBACK_VERSION}`;
+
+  if (npxPath) {
+    console.error(
+      `[rok-vibe-kanban] pinned client not resolvable; falling back to npx ${pkgSpec}`
+    );
+    run(npxPath, ['-y', pkgSpec, ...args]);
+  } else if (npmPath) {
+    console.error(
+      `[rok-vibe-kanban] pinned client not resolvable; npx not found, using npm exec ${pkgSpec}`
+    );
+    run(npmPath, ['exec', '--yes', pkgSpec, '--', ...args]);
+  } else {
+    const platformHint =
+      os.platform() === 'win32'
+        ? 'Install Node.js with npm, then ensure npm.cmd is on PATH.'
+        : 'Install Node.js with npm, then ensure npm is on PATH (e.g. /usr/bin/npm).';
+    console.error(
+      `[rok-vibe-kanban] pinned client not resolvable and neither npx nor npm is on PATH.\n` +
+        `  ${platformHint}`
+    );
+    process.exit(1);
+  }
 }

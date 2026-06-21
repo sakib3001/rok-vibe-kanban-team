@@ -48,6 +48,7 @@ fi
 NODE_BIN="$(command -v node)"
 NPM_BIN="$(command -v npm || true)"
 NODE_DIR="$(dirname "$NODE_BIN")"
+NPM_DIR="$(dirname "${NPM_BIN:-$NODE_BIN}")"
 log "Using Node $(node -v) at ${NODE_BIN}"
 [ "$(node_major)" -ge "$NODE_MIN_MAJOR" ] || die "Node is still < ${NODE_MIN_MAJOR} after install."
 [ -n "$NPM_BIN" ] || die "npm not found on PATH for user ${USER}. If using nvm, run 'nvm use <version>' first."
@@ -97,6 +98,9 @@ UNIT_FILE="${UNIT_DIR}/${SERVICE_NAME}.service"
 mkdir -p "$UNIT_DIR"
 
 log "Writing ${UNIT_FILE}"
+# Include discovered node/npm paths so the wrapper can spawn npm/npx under
+# systemd's restricted environment.
+SYSTEMD_PATH="${NODE_DIR}:${NPM_DIR}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:%h/.local/bin"
 cat > "$UNIT_FILE" <<EOF
 [Unit]
 Description=Vibe Kanban local client (Rokomari)
@@ -111,7 +115,7 @@ Environment=VK_SHARED_API_BASE=${CENTRAL_API_BASE}
 Environment=BACKEND_PORT=${VK_PORT}
 # systemd --user starts with a minimal PATH; add node, global npm bin, and the
 # user-local bin where AI CLIs (claude, etc.) install.
-Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:%h/.local/bin
+Environment=PATH=${SYSTEMD_PATH}
 ExecStart=${NODE_BIN} ${WRAPPER_BIN}
 Restart=on-failure
 RestartSec=5
