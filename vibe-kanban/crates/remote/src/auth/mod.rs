@@ -19,5 +19,4 @@ pub(crate) use middleware::{RequestContext, require_session};
 pub(crate) use oauth_token_validator::{OAuthTokenValidationError, OAuthTokenValidator};
 pub(crate) use provider::{
     GitHubOAuthProvider, GoogleOAuthProvider, ProviderRegistry, ProviderTokenDetails,
-    ZohoOAuthProvider,
 };

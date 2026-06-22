@@ -10,7 +10,7 @@ use crate::{
     attachments::cleanup::spawn_cleanup_task,
     auth::{
         GitHubOAuthProvider, GoogleOAuthProvider, JwtService, OAuthHandoffService,
-        OAuthTokenValidator, ProviderRegistry, ZohoOAuthProvider,
+        OAuthTokenValidator, ProviderRegistry,
     },
     azure_blob::AzureBlobService,
     billing::BillingService,
@@ -70,14 +70,6 @@ impl Server {
             registry.register(GoogleOAuthProvider::new(
                 google.client_id().to_string(),
                 google.client_secret().clone(),
-            )?);
-        }
-
-        if let Some(zoho) = auth_config.zoho() {
-            registry.register(ZohoOAuthProvider::new(
-                zoho.client_id().to_string(),
-                zoho.client_secret().clone(),
-                zoho.accounts_url().map(String::from),
             )?);
         }
 

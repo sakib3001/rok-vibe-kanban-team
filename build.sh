@@ -3,7 +3,7 @@
 # Build the Vibe Kanban images from the patched upstream source, then run
 # `docker compose up -d`. This applies the downstream patch stack first, so the
 # built image includes the patched backend AND the patched remote-web frontend
-# (Zoho buttons, invite-complete redirect, etc.) — no separate override needed.
+# (invite-complete redirect, etc.) — no separate override needed.
 #
 # Usage:
 #   ./build.sh            # build the remote image

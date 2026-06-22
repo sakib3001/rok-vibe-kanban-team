@@ -83,7 +83,6 @@
     "description": "Inicia sesión para unirte a organizaciones y compartir tareas con tu equipo",
     "continueWithGitHub": "Continuar con GitHub",
     "continueWithGoogle": "Continuar con Google",
-    "continueWithZoho": "Continuar con Zoho",
     "waitingTitle": "Completar Autenticación",
     "waitingDescription": "Se ha abierto una ventana emergente para la autenticación",
     "waitingForAuth": "Esperando autenticación...",

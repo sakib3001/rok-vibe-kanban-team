@@ -147,13 +147,6 @@ export default function InvitationPage() {
                 disabled={pendingProvider !== null}
                 loading={pendingProvider === "google"}
               />
-              <OAuthButton
-                provider="zoho"
-                label="Continue with Zoho"
-                onClick={() => void handleOAuthLogin("zoho")}
-                disabled={pendingProvider !== null}
-                loading={pendingProvider === "zoho"}
-              />
             </div>
           </section>
         </div>
@@ -184,7 +177,7 @@ function OAuthButton({
       disabled={disabled || loading}
     >
       {loading
-        ? `Opening ${provider === "github" ? "GitHub" : provider === "google" ? "Google" : "Zoho"}...`
+        ? `Opening ${provider === "github" ? "GitHub" : "Google"}...`
         : label}
     </button>
   );

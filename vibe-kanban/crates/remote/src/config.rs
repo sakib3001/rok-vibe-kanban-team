@@ -367,30 +367,9 @@ impl LocalAuthConfig {
 }
 
 #[derive(Debug, Clone)]
-pub struct ZohoOAuthProviderConfig {
-    inner: OAuthProviderConfig,
-    accounts_url: Option<String>,
-}
-
-impl ZohoOAuthProviderConfig {
-    pub fn client_id(&self) -> &str {
-        self.inner.client_id()
-    }
-
-    pub fn client_secret(&self) -> &SecretString {
-        self.inner.client_secret()
-    }
-
-    pub fn accounts_url(&self) -> Option<&str> {
-        self.accounts_url.as_deref()
-    }
-}
-
-#[derive(Debug, Clone)]
 pub struct AuthConfig {
     github: Option<OAuthProviderConfig>,
     google: Option<OAuthProviderConfig>,
-    zoho: Option<ZohoOAuthProviderConfig>,
     local: Option<LocalAuthConfig>,
     jwt_secret: SecretString,
     public_base_url: String,
@@ -428,25 +407,9 @@ impl AuthConfig {
             _ => None,
         };
 
-        let zoho = match env::var("ZOHO_OAUTH_CLIENT_ID") {
-            Ok(client_id) if !client_id.is_empty() => {
-                let client_secret = env::var("ZOHO_OAUTH_CLIENT_SECRET")
-                    .map_err(|_| ConfigError::MissingVar("ZOHO_OAUTH_CLIENT_SECRET"))?;
-                let accounts_url = env::var("ZOHO_ACCOUNTS_URL").ok().filter(|v| !v.is_empty());
-                Some(ZohoOAuthProviderConfig {
-                    inner: OAuthProviderConfig::new(
-                        client_id,
-                        SecretString::new(client_secret.into()),
-                    ),
-                    accounts_url,
-                })
-            }
-            _ => None,
-        };
-
         let local = LocalAuthConfig::from_env()?;
 
-        if github.is_none() && google.is_none() && zoho.is_none() && local.is_none() {
+        if github.is_none() && google.is_none() && local.is_none() {
             return Err(ConfigError::NoOAuthProviders);
         }
 
@@ -462,7 +425,6 @@ impl AuthConfig {
         Ok(Self {
             github,
             google,
-            zoho,
             local,
             jwt_secret,
             public_base_url,
@@ -476,10 +438,6 @@ impl AuthConfig {
 
     pub fn google(&self) -> Option<&OAuthProviderConfig> {
         self.google.as_ref()
-    }
-
-    pub fn zoho(&self) -> Option<&ZohoOAuthProviderConfig> {
-        self.zoho.as_ref()
     }
 
     pub fn local(&self) -> Option<&LocalAuthConfig> {

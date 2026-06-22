@@ -196,17 +196,6 @@ export default function LoginPage() {
                     loading={pending === "google"}
                   />
                 )}
-              {!isAuthMethodsError &&
-                hasOAuthProviders &&
-                oauthProviders.includes("zoho") && (
-                  <OAuthButton
-                    provider="zoho"
-                    label="Continue with Zoho"
-                    onClick={() => void handleLogin("zoho")}
-                    disabled={pending !== null}
-                    loading={pending === "zoho"}
-                  />
-                )}
             </div>
           </section>
 
@@ -249,7 +238,7 @@ function OAuthButton({
       disabled={disabled || loading}
     >
       {loading
-        ? `Opening ${provider === "github" ? "GitHub" : provider === "google" ? "Google" : "Zoho"}...`
+        ? `Opening ${provider === "github" ? "GitHub" : "Google"}...`
         : label}
     </button>
   );

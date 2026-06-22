@@ -83,7 +83,6 @@
     "description": "サインインして組織に参加し、チームとタスクを共有します",
     "continueWithGitHub": "GitHubで続行",
     "continueWithGoogle": "Googleで続行",
-    "continueWithZoho": "Zohoで続行",
     "waitingTitle": "認証を完了",
     "waitingDescription": "認証用のポップアップウィンドウが開きました",
     "waitingForAuth": "認証を待っています...",

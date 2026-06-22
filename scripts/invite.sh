@@ -21,7 +21,7 @@
 #
 #   link <email> [member|admin]
 #       Classic OAuth invitation: prints a 7-day accept link. Use for users who
-#       sign in via Zoho/GitHub/Google.
+#       sign in via GitHub/Google.
 #
 #   list
 #       List current org members (email | role | user_id).

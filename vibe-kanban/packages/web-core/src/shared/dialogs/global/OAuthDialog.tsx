@@ -23,7 +23,7 @@ import { oauthApi, type AuthMethodsResponse } from '@/shared/lib/api';
 import { useTranslation } from 'react-i18next';
 import { defineModal } from '@/shared/lib/modals';
 
-export type OAuthProvider = 'github' | 'google' | 'zoho';
+export type OAuthProvider = 'github' | 'google';
 type OAuthDialogProps = { initialProvider?: OAuthProvider };
 
 type OAuthState =
@@ -327,16 +327,6 @@ const OAuthDialogImpl = create<OAuthDialogProps>(({ initialProvider }) => {
                     provider="google"
                     className="w-full"
                     onClick={() => handleProviderSelect('google')}
-                    disabled={isSubmittingLocal}
-                  />
-                )}
-              {!isAuthMethodsError &&
-                hasOAuthProviders &&
-                oauthProviders.includes('zoho') && (
-                  <OAuthSignInButton
-                    provider="zoho"
-                    className="w-full"
-                    onClick={() => handleProviderSelect('zoho')}
                     disabled={isSubmittingLocal}
                   />
                 )}

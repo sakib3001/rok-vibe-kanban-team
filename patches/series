@@ -1,5 +1,4 @@
 # Downstream patch stack applied to vibe-kanban/ in order
-0001-feat-add-Zoho-OAuth-provider-support.patch
 0002-feat-support-browser-scoped-auth-ses.patch
 0003-feat-require-workspace-auth-and-add-.patch
 0004-feat-unified-code-server-editor-flow.patch
@@ -9,7 +8,6 @@
 0008-feat-add-GitLab-merge-request-integr.patch
 0009-feat-rewrite-terminal-localhost-link.patch
 0010-feat-support-VSCODE_PROXY_URI-in-pre.patch
-0011-feat-add-Zoho-sign-in-button-to-OAut.patch
 0012-feat-remote-use-R2-for-attachment-st.patch
 0013-update-loops-template-ids.patch
 0014-fix-remote-add-attachment-upload-rel.patch
@@ -38,5 +36,4 @@
 0037-fix-Antigravity-visible-text-and-workspace-cwd.patch
 0038-feat-toggle-browser-scoped-auth-env.patch
 0039-fix-Antigravity-follow-up-replay-and-labels.patch
-0040-feat-add-Zoho-sign-in-button-to-remote-web.patch
 0041-fix-invite-complete-redirect-into-app.patch

@@ -83,7 +83,6 @@
     "description": "로그인하여 조직에 참여하고 팀과 작업을 공유하세요",
     "continueWithGitHub": "GitHub로 계속",
     "continueWithGoogle": "Google로 계속",
-    "continueWithZoho": "Zoho로 계속",
     "waitingTitle": "인증 완료",
     "waitingDescription": "인증을 위한 팝업 창이 열렸습니다",
     "waitingForAuth": "인증 대기 중...",

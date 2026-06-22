@@ -83,7 +83,6 @@
     "description": "登录以加入组织并与团队共享任务",
     "continueWithGitHub": "使用 GitHub 继续",
     "continueWithGoogle": "使用 Google 继续",
-    "continueWithZoho": "使用 Zoho 继续",
     "waitingTitle": "完成身份验证",
     "waitingDescription": "已打开弹出窗口进行身份验证",
     "waitingForAuth": "等待身份验证...",
