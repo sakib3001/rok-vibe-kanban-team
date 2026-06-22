@@ -14,7 +14,7 @@ Kubernetes required. Stack: PostgreSQL + ElectricSQL + Remote Server + Caddy (TL
 - The `vibe-kanban/` source (in this same repo root) — for building from source
 - A domain name with an **A record → this host's public IP**
 - Ports **80 and 443** open (Caddy needs them for Let's Encrypt + serving)
-- One OAuth app (GitHub, Google, or Zoho)
+- One OAuth app (GitHub or Google)
 
 ## Setup
 
@@ -31,8 +31,8 @@ echo "JWT_SECRET=$(openssl rand -base64 32)"     # must stay valid base64 (>=32 
 ## Build from source, then up (recommended)
 
 The remote image is built from the patched `vibe-kanban/` source — so the image
-contains the patched backend **and** the patched `remote-web` frontend (Zoho buttons,
-invite-complete redirect). No registry pull, no frontend override needed.
+contains the patched backend **and** the patched `remote-web` frontend (invite-complete
+redirect). No registry pull, no frontend override needed.
 
 ```bash
 ./build.sh                 # init submodule -> apply patch stack -> docker compose build remote
@@ -68,7 +68,7 @@ Use a pinned `IMAGE_TAG` in `.env` before go-live.
 For your provider, set the callback URL to:
 
 ```
-https://<PUBLIC_DOMAIN>/v1/oauth/callback/github     # or /google, /zoho
+https://<PUBLIC_DOMAIN>/v1/oauth/callback/github     # or /google
 ```
 
 ## Run

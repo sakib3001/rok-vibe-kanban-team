@@ -9,7 +9,7 @@
 
 **Vibe Kanban** is an open-source (Apache-2.0) platform for planning software work on a kanban board and executing it with AI coding agents (Claude Code, Cursor, Codex, Gemini CLI, and others).
 
-The **Rokomari deployment** (`rok-vibe-kanban-team`) wraps upstream Vibe Kanban with downstream patches (Zoho OAuth, GitLab MRs, domain restrictions, ingest API) and runs it as a **Docker Compose stack** on a single VM at `https://vk.rokomari.io`.
+The **Rokomari deployment** (`rok-vibe-kanban-team`) wraps upstream Vibe Kanban with downstream patches (GitLab MRs, domain restrictions, ingest API) and runs it as a **Docker Compose stack** on a single VM at `https://vk.rokomari.io`.
 
 | Layer | Responsibility |
 |-------|----------------|
@@ -61,7 +61,7 @@ The **Rokomari deployment** (`rok-vibe-kanban-team`) wraps upstream Vibe Kanban 
 2. **Mandatory local client** — Every developer runs `npx @rokomari/vibe-kanban`; there is no browser-only execution path.
 3. **Explicit assignment** — Work is routed to named owners, not just a shared board.
 4. **Local power, central coordination** — AI agents, git, and dev servers run on the developer's machine; only metadata syncs centrally.
-5. **Closed team** — Zoho OAuth + `@rokomari.com` domain restriction; invite-based org membership.
+5. **Closed team** — GitHub/Google OAuth + `@rokomari.com` domain restriction; invite-based org membership.
 6. **Automation-ready** — External tools can create issues via `POST /ingest/issues` (optional ingest profile).
 
 ### Key artifacts
@@ -208,8 +208,8 @@ The **Rokomari deployment** (`rok-vibe-kanban-team`) wraps upstream Vibe Kanban 
 ```
   Developer                    Central Remote
       │                              │
-      │  "Continue with Zoho"        │
-      ├─────────────────────────────►│  OAuth (GitHub / Google / Zoho)
+      │  "Continue with GitHub"      │
+      ├─────────────────────────────►│  OAuth (GitHub / Google)
       │                              │
       │◄────── JWT session token ────┤
       │                              │
@@ -246,7 +246,7 @@ The **Rokomari deployment** (`rok-vibe-kanban-team`) wraps upstream Vibe Kanban 
 | TLS / proxy | Caddy (Let's Encrypt) |
 | Client distribution | npm (`@rokomari/vibe-kanban`) |
 | Deployment | Docker Compose on single Linux VM |
-| Auth | OAuth (Zoho primary) + bootstrap local admin |
+| Auth | OAuth (GitHub/Google) + bootstrap local admin |
 
 ---
 

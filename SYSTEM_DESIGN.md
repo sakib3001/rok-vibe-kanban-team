@@ -134,7 +134,7 @@ caller → Caddy (/ingest/*) → ingest:8090 → remote:8081 (/v1/issues, as ser
 
 ```mermaid
 flowchart LR
-  user[Developer] -->|OAuth| provider[GitHub / Google / Zoho]
+  user[Developer] -->|OAuth| provider[GitHub / Google]
   provider --> remote[Remote Server]
   remote -->|issues JWT| user
   remote --> org{Organization}
@@ -142,7 +142,7 @@ flowchart LR
   org -->|MEMBER| devs[Developers]
 ```
 
-- **OAuth providers**: GitHub + Google (native), Zoho (downstream patch). Pick one as
+- **OAuth providers**: GitHub + Google (native). Pick one as
   primary for the team.
 - **Allowed-email-domain restriction** (downstream patch) limits sign-up to company
   domains — recommended for a closed team.

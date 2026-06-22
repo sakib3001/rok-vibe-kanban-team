@@ -38,7 +38,7 @@ not an accepted default in this rollout.
 - A Linux VM with **Docker + Docker Compose v2**
 - Ports **80 and 443** open to the internet (Caddy / Let's Encrypt)
 - A domain with a **single A record → the VM's public IP** (no wildcard needed)
-- An OAuth app (Zoho)
+- An OAuth app (GitHub or Google)
 - *(handled by the stack, not you:)* PostgreSQL with `wal_level=logical` + the
 `electric_sync` REPLICATION role — both configured automatically in
 `docker-compose.yml` + `init-db/`.

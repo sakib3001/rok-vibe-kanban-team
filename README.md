@@ -15,9 +15,8 @@ downstream patch stack. Deployed via **Docker Compose** (no Helm/Kubernetes).
 | `scripts/build-portable-linux.sh` | Rebuild only the linux `vibe-kanban` binary (glibc 2.31) and stage it for R2 |
 | `scripts/Dockerfile.portable-linux` | Builds the linux binaries on Debian bullseye (glibc 2.31) for broad Ubuntu support |
 
-Notable downstream patches: Zoho OAuth (provider + sign-in buttons), GitLab MRs,
-allowed-email-domains, browser notifications, executor pins, and the remote-web
-fixes (`0040` Zoho buttons, `0041` invite-complete redirect).
+Notable downstream patches: GitLab MRs, allowed-email-domains, browser notifications,
+executor pins, and the remote-web fix (`0041` invite-complete redirect).
 
 ## Deployment & ops
 

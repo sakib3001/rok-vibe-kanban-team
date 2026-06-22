@@ -11,7 +11,7 @@
 | Stack | postgres + remote + electric + caddy (healthy) |
 | Docker on boot | enabled |
 | Auth (temporary) | bootstrap local admin (see below) |
-| OAuth (Zoho/GitHub/Google) | deferred |
+| OAuth (GitHub/Google) | deferred |
 | Harbor registry | deferred |
 | Image pin | pin digest/tag in `.env` before next upgrade |
 | Team org / project | "Rokomari SE Team" / **Amaly** |
@@ -99,7 +99,7 @@ docker compose --profile ingest --profile memory pull && docker compose --profil
 
 ## 5) Deferred (do later)
 
-- **Zoho OAuth**: set `ZOHO_OAUTH_CLIENT_ID` / `ZOHO_OAUTH_CLIENT_SECRET`, callback `https://vk.rokomari.io/v1/oauth/callback/zoho`, then clear bootstrap auth vars.
+- **OAuth (GitHub/Google)**: set `GITHUB_OAUTH_CLIENT_ID` / `GITHUB_OAUTH_CLIENT_SECRET` (or the `GOOGLE_*` pair), callback `https://vk.rokomari.io/v1/oauth/github/callback`, then clear bootstrap auth vars.
 - **Harbor images**: set `REMOTE_IMAGE` and pinned `IMAGE_TAG` in `.env`.
 - **Phase 1.5**: publish the `@rokomari/vibe-kanban` wrapper (already built in `../rok-vibe-kanban-launcher/`) to the npm registry.
 - **Phase 4**: dispatch CLI for leads.

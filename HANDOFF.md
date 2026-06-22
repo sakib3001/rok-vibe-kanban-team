@@ -6,6 +6,11 @@ Single source of truth for picking up this project. Read this first.
 
 ## 0. Recent changes completed (2026-06-18)
 
+- **Zoho OAuth removed (2026-06-22):** the Zoho provider was removed end to end (server +
+  client) and its patches (0001/0011/0040) dropped from the stack. **GitHub** and **Google**
+  are the only OAuth providers now. Verified: remote crate `cargo check` + remote-web build
+  pass with zero Zoho references. (Prod still runs the old Zoho-enabled image until a build
+  from current code is deployed — see §2/§6.)
 - **Repo flattened to one root:** removed the extra `docker/` wrapper directory; deployment
   artifacts now live at project root (`docker-compose.yml`, `build.sh`, `Caddyfile*`,
   `.env*`, `ingest/`, `init-db/`, `sql/`, `scripts/{invite,backup}.sh`).
@@ -47,15 +52,15 @@ Companion docs (project root): `REQUIREMENTS_AND_PLAN.md`, `SYSTEM_DESIGN.md`,
 | Remote image | `ghcr.io/iamriajul/vibe-kanban-team-remote`, pinned `IMAGE_TAG=0.1.44-20260617110518` |
 | Team org | **"Rokomari SE Team"** = `a6a82264-9129-4537-aae4-63b51181b243` |
 | Team project | **"Amaly"** = `63051e48-a41b-4242-8c67-138b24e7114a`, default status "To do" |
-| Users | `admin@rokomari.io` (`d0b4a3d3-…`, bootstrap + **service account**, team admin) · `sakib@rokomari.com` (`798c8da6-…`, Zoho, team admin) |
-| Auth | **Zoho OAuth** (DC `.com`, `accounts.zoho.com`) + bootstrap **local auth** (`admin@rokomari.io`). `ALLOWED_EMAIL_DOMAINS=rokomari.com` |
-| Secrets | All in VM `/home/ubuntu/vibe-kanban/.env` (DB pw, JWT, Zoho client id/secret, INGEST_API_KEY, local-auth pw). **Not** in git. |
+| Users | `admin@rokomari.io` (`d0b4a3d3-…`, bootstrap + **service account**, team admin) · `sakib@rokomari.com` (`798c8da6-…`, team admin) |
+| Auth | **GitHub/Google OAuth** + bootstrap **local auth** (`admin@rokomari.io`). `ALLOWED_EMAIL_DOMAINS=rokomari.com`. ⚠️ Zoho OAuth has been **removed from the codebase**; prod still runs the old Zoho-enabled image until a build from current code is deployed. |
+| Secrets | All in VM `/home/ubuntu/vibe-kanban/.env` (DB pw, JWT, OAuth client id/secret, INGEST_API_KEY, local-auth pw). **Not** in git. |
 
 **⚠️ The patched frontend is currently served via a STOPGAP override on prod:**
 `docker-compose.override.yml` mounts `./remote-web-dist` (a locally-built `remote-web`
 bundle) over the container's `/srv/static`. This is because the GHCR image
-(`0.1.44-20260617110518`) does **not** contain patches 0040/0041 (Zoho buttons + invite
-redirect). The clean end-state is to build a remote image **with** those patches and pin
+(`0.1.44-20260617110518`) does **not** contain patch 0041 (invite-complete
+redirect). The clean end-state is to build a remote image **with** that patch and pin
 it, then delete the override + `remote-web-dist`. See §6.
 
 ---
@@ -74,7 +79,7 @@ it, then delete the override + `remote-web-dist`. See §6.
 ### Invite flow
 - Create: `scripts/invite.sh <email> [member|admin]` (run on the VM; reads admin
   creds + `INGEST_ORG_ID` from `.env`). Prints `https://vk.rokomari.io/invitations/<token>/accept`.
-- Accept: open link → InvitationPage → **Continue with Zoho** → joins team org → "Go to your
+- Accept: open link → InvitationPage → **Continue with GitHub/Google** → joins team org → "Go to your
   workspace" (→ `/`). Then visible on Amaly + assignable (UI + ingest API).
 - **Loops email is NOT configured** → delivery is manual link sharing. To enable email: set
   `LOOPS_EMAIL_API_KEY` + `LOOPS_INVITE_TEMPLATE_ID` (the baked-in default template IDs are
@@ -99,18 +104,18 @@ it, then delete the override + `remote-web-dist`. See §6.
 
 Submodule `vibe-kanban/` pinned at tag `v0.1.44-20260424091429`. Patch stack applied at build
 time via `scripts/apply-patches.sh`. Our additions:
-- **0040** — add Zoho sign-in button to `remote-web` `LoginPage.tsx` + `InvitationPage.tsx`
-  + `OAuthProvider` type. (Upstream patch 0011 only added Zoho to the *local-web* OAuthDialog;
-  `remote-web` was missed — that was the "no Zoho button on the web portal" bug.)
 - **0041** — `InvitationCompletePage.tsx` "Get started" now links to `/` (was hardcoded to
   `www.vibekanban.com/docs/getting-started`).
+
+> Zoho OAuth (former patches 0001/0011/0040) has been removed from both the source tree and
+> the patch stack — GitHub and Google are the only OAuth providers now.
 
 ---
 
 ## 5. Critical gotchas / lessons (will bite you)
 
 - **OAuth callback path is `/v1/oauth/{provider}/callback`** (provider in the middle), NOT
-  `/v1/oauth/callback/{provider}`. Zoho redirect URI = `https://vk.rokomari.io/v1/oauth/zoho/callback`.
+  `/v1/oauth/callback/{provider}`. E.g. GitHub redirect URI = `https://vk.rokomari.io/v1/oauth/github/callback`.
 - **API enums:** issue `priority` is **lowercase** (`high`); member `role` is **UPPERCASE**
   (`MEMBER`/`ADMIN`).
 - **Docker `.env` is NOT shell-sourceable** — values contain spaces (`INGEST_STATUS_NAME=to do`).
@@ -135,18 +140,20 @@ time via `scripts/apply-patches.sh`. Our additions:
 
 ## 6. Open items / next steps
 
-1. **Make the frontend fix durable:** build a remote image WITH patches 0040+0041 and pin it
-   in prod `.env` (`IMAGE_TAG`), then delete `docker-compose.override.yml` + `remote-web-dist`
-   on the VM. Build is wired: `./build.sh` (applies patches → `docker compose
-   build remote`) — see §7. Currently the patched frontend runs only via the override stopgap.
+1. **Make the frontend fix durable:** build a remote image WITH patch 0041 (and the current
+   Zoho-removed code) and pin it in prod `.env` (`IMAGE_TAG`), then delete
+   `docker-compose.override.yml` + `remote-web-dist` on the VM. Build is wired: `./build.sh`
+   (applies patches → `docker compose build remote`) — see §7. Currently the patched frontend
+   runs only via the override stopgap.
 2. **Commit / new private repo:** the repo is uncommitted. User intends to **recreate a private
    repo**. Helm/k8s + CI were removed (see §8). To start clean: `rm -rf .git && git init`
    (the existing `.git` is the upstream `iamriajul` history). Artifacts to keep are
    listed in §8.
 3. **Loops** email for invitations (optional; manual links work today).
 4. **Publish** `@rokomari/vibe-kanban` to an npm registry (public `@rokomari` or internal).
-5. **Rotate the Zoho client secret** (it was pasted in a chat during setup).
-6. **End-to-end invite test:** `joy@rokomari.com` was invited (pending) — confirm a real Zoho
+5. **Configure GitHub/Google OAuth** for prod and deploy a build from the current
+   (Zoho-removed) code, then clear the old Zoho `.env` vars on the VM.
+6. **End-to-end invite test:** `joy@rokomari.com` was invited (pending) — confirm a real OAuth
    accept lands them in the team org.
 
 ---

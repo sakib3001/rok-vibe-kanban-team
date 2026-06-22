@@ -65,7 +65,7 @@ Build a centralized Vibe Kanban setup where:
    - Issue and assignment changes sync in near real time via ElectricSQL shapes (proxied through remote server).
 
 5. **Team onboarding**
-   - OAuth sign-in (GitHub, Google, or Zoho) + optional allowed-email-domain restriction.
+   - OAuth sign-in (GitHub or Google) + optional allowed-email-domain restriction.
    - Invite-based org membership; new members access assigned tasks immediately via local client.
 
 6. **Lead operations**
