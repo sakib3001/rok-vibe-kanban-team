@@ -30,6 +30,8 @@ pub(super) fn router() -> Router<AppState> {
 struct InsightsQuery {
     /// One of `7d`, `30d`, `all`. Defaults to `30d`.
     window: Option<String>,
+    /// Restrict every metric to a single project. Omit for the whole org.
+    project_id: Option<Uuid>,
 }
 
 /// Resolve a window string to a lower-bound timestamp. `None` means "all time".
@@ -116,6 +118,8 @@ struct BucketRow {
 #[derive(Debug, Serialize)]
 pub struct InsightsResponse {
     pub organization_id: Uuid,
+    /// Echoes the project filter that was applied, if any.
+    pub project_id: Option<Uuid>,
     pub window: String,
     pub since: Option<DateTime<Utc>>,
     pub generated_at: DateTime<Utc>,
@@ -150,6 +154,7 @@ async fn get_organization_insights(
     let now = Utc::now();
     let window = query.window.as_deref().unwrap_or("30d").to_string();
     let since = window_since(&window, now);
+    let project_id = query.project_id;
 
     let rows = sqlx::query_as::<_, InsightsRow>(
         r#"
@@ -161,7 +166,9 @@ async fn get_organization_insights(
             WHERE m.organization_id = $1
         ),
         org_projects AS (
-            SELECT id FROM projects WHERE organization_id = $1
+            SELECT id FROM projects
+            WHERE organization_id = $1
+              AND ($3::uuid IS NULL OR id = $3)
         ),
         last_sessions AS (
             SELECT s.user_id, MAX(s.last_used_at) AS last_session_at
@@ -226,6 +233,7 @@ async fn get_organization_insights(
     )
     .bind(org_id)
     .bind(since)
+    .bind(project_id)
     .fetch_all(&state.pool)
     .await
     .map_err(|e| db_error(e, "Failed to load insights"))?;
@@ -271,13 +279,17 @@ async fn get_organization_insights(
                 ORDER BY EXTRACT(EPOCH FROM (i.completed_at - i.created_at))::double precision / 3600.0
             ) AS median_hours
         FROM issues i
-        WHERE i.project_id IN (SELECT id FROM projects WHERE organization_id = $1)
+        WHERE i.project_id IN (
+                SELECT id FROM projects
+                WHERE organization_id = $1 AND ($3::uuid IS NULL OR id = $3)
+              )
           AND i.completed_at IS NOT NULL
           AND ($2::timestamptz IS NULL OR i.completed_at >= $2)
         "#,
     )
     .bind(org_id)
     .bind(since)
+    .bind(project_id)
     .fetch_one(&state.pool)
     .await
     .map_err(|e| db_error(e, "Failed to load cycle time"))?;
@@ -288,7 +300,10 @@ async fn get_organization_insights(
         SELECT date_trunc('week', i.completed_at) AS week_start,
                COUNT(*)::bigint AS count
         FROM issues i
-        WHERE i.project_id IN (SELECT id FROM projects WHERE organization_id = $1)
+        WHERE i.project_id IN (
+                SELECT id FROM projects
+                WHERE organization_id = $1 AND ($3::uuid IS NULL OR id = $3)
+              )
           AND i.completed_at IS NOT NULL
           AND ($2::timestamptz IS NULL OR i.completed_at >= $2)
         GROUP BY 1
@@ -297,6 +312,7 @@ async fn get_organization_insights(
     )
     .bind(org_id)
     .bind(since)
+    .bind(project_id)
     .fetch_all(&state.pool)
     .await
     .map_err(|e| db_error(e, "Failed to load throughput"))?;
@@ -316,6 +332,7 @@ async fn get_organization_insights(
 
     Ok(Json(InsightsResponse {
         organization_id: org_id,
+        project_id,
         window,
         since,
         generated_at: now,

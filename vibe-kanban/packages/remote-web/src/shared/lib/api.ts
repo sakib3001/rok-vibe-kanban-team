@@ -240,6 +240,7 @@ export type DeliverySummary = {
 
 export type OrganizationInsightsResponse = {
   organization_id: string;
+  project_id: string | null;
   window: string;
   since: string | null;
   generated_at: string;
@@ -250,8 +251,12 @@ export type OrganizationInsightsResponse = {
 export async function getOrganizationInsights(
   organizationId: string,
   window: InsightsWindow,
+  projectId?: string | null,
 ): Promise<OrganizationInsightsResponse> {
   const params = new URLSearchParams({ window });
+  if (projectId) {
+    params.set("project_id", projectId);
+  }
   const res = await authenticatedFetch(
     `${API_BASE}/v1/organizations/${organizationId}/insights?${params}`,
   );

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { MemberRole } from "shared/types";
@@ -11,6 +11,7 @@ import {
 } from "@/shared/stores/useOrganizationStore";
 import {
   getOrganizationInsights,
+  listOrganizationProjects,
   type DeliverySummary,
   type DeveloperInsights,
   type InsightsWindow,
@@ -74,6 +75,8 @@ export default function InsightsPage() {
   const setSelectedOrgId = useSetSelectedOrgId();
 
   const [window, setWindow] = useState<InsightsWindow>("30d");
+  // null = all projects in the org.
+  const [projectId, setProjectId] = useState<string | null>(null);
   const [sortKey, setSortKey] = useState<SortKey>("score");
   // score is most useful descending; the user can flip per column.
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
@@ -90,13 +93,24 @@ export default function InsightsPage() {
     adminOrgs.find((o) => o.id === selectedOrgId) ?? adminOrgs[0] ?? null;
   const orgId = activeOrg?.id ?? null;
 
+  // Reset the project filter whenever the active org changes — its projects differ.
+  useEffect(() => {
+    setProjectId(null);
+  }, [orgId]);
+
+  const { data: projects } = useQuery({
+    queryKey: ["org-projects", orgId],
+    queryFn: () => listOrganizationProjects(orgId as string),
+    enabled: !!orgId,
+  });
+
   const {
     data,
     isLoading: insightsLoading,
     error,
   } = useQuery({
-    queryKey: ["organization-insights", orgId, window],
-    queryFn: () => getOrganizationInsights(orgId as string, window),
+    queryKey: ["organization-insights", orgId, window, projectId],
+    queryFn: () => getOrganizationInsights(orgId as string, window, projectId),
     enabled: !!orgId,
   });
 
@@ -236,7 +250,11 @@ export default function InsightsPage() {
             Team insights
           </h1>
           <p className="text-sm text-low">
-            Engagement and delivery leaderboard, ranked by activity score.
+            {projectId
+              ? `${
+                  projects?.find((p) => p.id === projectId)?.name ?? "Project"
+                } · engagement and delivery, ranked by activity score.`
+              : "Engagement and delivery leaderboard, ranked by activity score."}
           </p>
         </div>
 
@@ -252,6 +270,23 @@ export default function InsightsPage() {
                   {o.name}
                 </option>
               ))}
+            </select>
+          ) : null}
+
+          {projects && projects.length > 0 ? (
+            <select
+              value={projectId ?? ""}
+              onChange={(e) => setProjectId(e.target.value || null)}
+              className="max-w-48 rounded-sm border border-border bg-primary px-base py-half text-sm text-high"
+            >
+              <option value="">All projects</option>
+              {[...projects]
+                .sort((a, b) => a.name.localeCompare(b.name))
+                .map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
             </select>
           ) : null}
 
