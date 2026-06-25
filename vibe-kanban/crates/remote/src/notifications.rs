@@ -198,5 +198,42 @@ fn build_payload(
         new_priority: extra_payload.new_priority,
         assignee_user_id: extra_payload.assignee_user_id,
         emoji: extra_payload.emoji,
+        approval_note: extra_payload.approval_note,
+        project_id: extra_payload.project_id,
+        project_name: extra_payload.project_name,
+    }
+}
+
+/// Notify a member that they were assigned to a project. Unlike the issue
+/// helpers this is not tied to an issue, so it writes the row directly with a
+/// project deeplink and no `issue_id`.
+pub async fn notify_project_assigned(
+    pool: &PgPool,
+    organization_id: Uuid,
+    actor_user_id: Uuid,
+    recipient_user_id: Uuid,
+    project_id: Uuid,
+    project_name: String,
+) {
+    let payload = NotificationPayload {
+        deeplink_path: Some(format!("/projects/{project_id}")),
+        actor_user_id: Some(actor_user_id),
+        project_id: Some(project_id),
+        project_name: Some(project_name),
+        ..Default::default()
+    };
+
+    if let Err(e) = NotificationRepository::create(
+        pool,
+        organization_id,
+        recipient_user_id,
+        NotificationType::ProjectAssigned,
+        payload,
+        None,
+        None,
+    )
+    .await
+    {
+        tracing::warn!(?e, %recipient_user_id, %project_id, "failed to create project_assigned notification");
     }
 }

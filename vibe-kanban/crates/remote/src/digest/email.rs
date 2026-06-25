@@ -192,6 +192,29 @@ fn build_digest_copy(row: &NotificationDigestRow) -> DigestCopy {
             format!("{actor_name} changed the description on {issue_label}"),
             issue_context(payload).map(|issue| format!("Updated the description on {issue}.")),
         ),
+        NotificationType::IssueApprovalRequested => (
+            format!("{actor_name} submitted {issue_label} for your approval"),
+            issue_context(payload),
+        ),
+        NotificationType::IssueApprovalGranted => (
+            format!("{actor_name} approved {issue_label}"),
+            issue_context(payload),
+        ),
+        NotificationType::IssueApprovalRejected => {
+            let note = clean_optional_text(payload.approval_note.as_deref());
+            let body = note
+                .map(|note| format!("Requested changes: {note}"))
+                .or_else(|| issue_context(payload));
+            (
+                format!("{actor_name} requested changes on {issue_label}"),
+                body,
+            )
+        }
+        NotificationType::ProjectAssigned => {
+            let project = clean_optional_text(payload.project_name.as_deref())
+                .unwrap_or_else(|| "a project".to_string());
+            (format!("{actor_name} assigned you to {project}"), None)
+        }
     };
 
     DigestCopy {

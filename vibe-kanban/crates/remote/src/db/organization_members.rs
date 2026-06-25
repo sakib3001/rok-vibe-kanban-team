@@ -50,6 +50,26 @@ pub(crate) async fn check_user_role(
     Ok(result.map(|r| r.role))
 }
 
+/// User ids of all admins in an organization. Uses the runtime query API (not
+/// the `query!` macro) so it doesn't depend on the `.sqlx` offline cache —
+/// same approach as `routes/insights.rs` and `db/project_members.rs`.
+pub async fn list_admin_user_ids(
+    pool: &PgPool,
+    organization_id: Uuid,
+) -> Result<Vec<Uuid>, sqlx::Error> {
+    sqlx::query_scalar(
+        r#"
+        SELECT user_id
+        FROM organization_member_metadata
+        WHERE organization_id = $1 AND role = $2
+        "#,
+    )
+    .bind(organization_id)
+    .bind(MemberRole::Admin)
+    .fetch_all(pool)
+    .await
+}
+
 pub async fn is_member<'a, E>(
     executor: E,
     organization_id: Uuid,

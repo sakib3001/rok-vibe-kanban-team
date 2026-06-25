@@ -204,6 +204,36 @@ export function getGroupedNotificationSegments(
     }
     case 'issue_deleted':
       return [...actor, text(' deleted '), ...issueSegments];
+    case 'issue_approval_requested':
+      return [
+        ...actor,
+        text(' submitted '),
+        ...issueSegments,
+        text(' for your approval'),
+      ];
+    case 'issue_approval_granted':
+      return [...actor, text(' approved '), ...issueSegments];
+    case 'issue_approval_rejected': {
+      const note = payload.approval_note;
+      if (note) {
+        return [
+          ...actor,
+          text(' requested changes on '),
+          ...issueSegments,
+          text(': '),
+          emphasis(note),
+        ];
+      }
+      return [...actor, text(' requested changes on '), ...issueSegments];
+    }
+    case 'project_assigned': {
+      const name = payload.project_name;
+      return [
+        ...actor,
+        text(' assigned you to '),
+        name ? emphasis(name) : text('a project'),
+      ];
+    }
     default:
       return [text('New notification')];
   }

@@ -22,7 +22,7 @@ use crate::{
     auth::RequestContext,
     db::{
         get_txid, issue_followers::IssueFollowerRepository, issues::IssueRepository,
-        project_statuses::ProjectStatusRepository,
+        organization_members, project_statuses::ProjectStatusRepository,
     },
     mutation_definition::MutationBuilder,
     notifications::{
@@ -48,6 +48,53 @@ pub fn router() -> axum::Router<AppState> {
         .route("/issues/bulk", post(bulk_update_issues))
 }
 
+/// When an issue lands in the approval queue (approval_state='pending' after a
+/// status change), notify every org admin except the actor.
+async fn notify_approval_requested(
+    state: &AppState,
+    organization_id: Uuid,
+    actor_user_id: Uuid,
+    issue: &Issue,
+) {
+    let approval_state: Option<String> =
+        sqlx::query_scalar("SELECT approval_state::text FROM issues WHERE id = $1")
+            .bind(issue.id)
+            .fetch_optional(state.pool())
+            .await
+            .ok()
+            .flatten();
+
+    if approval_state.as_deref() != Some("pending") {
+        return;
+    }
+
+    let admins =
+        match organization_members::list_admin_user_ids(state.pool(), organization_id).await {
+            Ok(admins) => admins,
+            Err(error) => {
+                tracing::warn!(?error, %organization_id, "failed to list admins for approval notification");
+                return;
+            }
+        };
+    let recipients: Vec<Uuid> = admins
+        .into_iter()
+        .filter(|id| *id != actor_user_id)
+        .collect();
+
+    send_issue_notifications(
+        state.pool(),
+        organization_id,
+        actor_user_id,
+        &recipients,
+        issue,
+        NotificationType::IssueApprovalRequested,
+        NotificationPayload::default(),
+        None,
+        Some(issue.id),
+    )
+    .await;
+}
+
 async fn notify_issue_update_changes(
     state: &AppState,
     organization_id: Uuid,
@@ -64,6 +111,15 @@ async fn notify_issue_update_changes(
         status_changed || title_changed || description_changed || priority_changed;
     if !needs_notification {
         return;
+    }
+
+    // A status change can flip the issue into the approval queue (the DB trigger
+    // sets approval_state='pending' when it lands on a Done status of a project
+    // that requires approval). Notify the org's admins so they can act. This is
+    // gated on admins, not issue subscribers, so it runs before the subscriber
+    // early-return below.
+    if status_changed {
+        notify_approval_requested(state, organization_id, actor_user_id, new_issue).await;
     }
 
     let recipients =

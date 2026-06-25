@@ -7,6 +7,7 @@
 //! NOT part of the synced Issue/Project structs — they're exposed only here, so
 //! the existing column-explicit queries are untouched.
 
+use api_types::{NotificationPayload, NotificationType};
 use axum::{
     Json, Router,
     extract::{Extension, Path, State},
@@ -25,7 +26,8 @@ use super::{
 use crate::{
     AppState,
     auth::RequestContext,
-    db::{begin_tx, get_txid, projects::ProjectRepository},
+    db::{begin_tx, get_txid, issues::IssueRepository, projects::ProjectRepository},
+    notifications::notify_issue_subscribers,
 };
 
 pub(super) fn router() -> Router<AppState> {
@@ -234,6 +236,20 @@ async fn approve_issue(
         .await
         .map_err(|e| db_error(e, "failed to commit"))?;
 
+    // Notify the issue's developers (assignees + followers) that it was approved.
+    if let Ok(Some(issue)) = IssueRepository::find_by_id(state.pool(), issue_id).await {
+        notify_issue_subscribers(
+            state.pool(),
+            org_id,
+            ctx.user.id,
+            &issue,
+            NotificationType::IssueApprovalGranted,
+            NotificationPayload::default(),
+            None,
+        )
+        .await;
+    }
+
     Ok(Json(OkResponse { ok: true, txid }))
 }
 
@@ -287,7 +303,7 @@ async fn reject_issue(
     )
     .bind(issue_id)
     .bind(target)
-    .bind(payload.note)
+    .bind(payload.note.clone())
     .execute(&mut *tx)
     .await
     .map_err(|e| db_error(e, "failed to reject issue"))?;
@@ -305,6 +321,23 @@ async fn reject_issue(
     tx.commit()
         .await
         .map_err(|e| db_error(e, "failed to commit"))?;
+
+    // Notify the issue's developers that changes were requested, with the note.
+    if let Ok(Some(issue)) = IssueRepository::find_by_id(state.pool(), issue_id).await {
+        notify_issue_subscribers(
+            state.pool(),
+            org_id,
+            ctx.user.id,
+            &issue,
+            NotificationType::IssueApprovalRejected,
+            NotificationPayload {
+                approval_note: payload.note.clone(),
+                ..Default::default()
+            },
+            None,
+        )
+        .await;
+    }
 
     Ok(Json(OkResponse { ok: true, txid }))
 }

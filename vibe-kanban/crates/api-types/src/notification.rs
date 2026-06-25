@@ -19,6 +19,10 @@ pub enum NotificationType {
     IssueDeleted,
     IssueTitleChanged,
     IssueDescriptionChanged,
+    IssueApprovalRequested,
+    IssueApprovalGranted,
+    IssueApprovalRejected,
+    ProjectAssigned,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -78,6 +82,14 @@ pub struct NotificationPayload {
     pub assignee_user_id: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub emoji: Option<String>,
+    /// Rejection reason for `issue_approval_rejected`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_note: Option<String>,
+    /// Target project for `project_assigned` (non-issue notifications).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, TS)]

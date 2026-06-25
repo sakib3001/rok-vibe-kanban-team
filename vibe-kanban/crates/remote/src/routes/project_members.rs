@@ -23,6 +23,7 @@ use crate::{
     AppState,
     auth::RequestContext,
     db::{project_members::ProjectMemberRepository, projects::ProjectRepository},
+    notifications::notify_project_assigned,
 };
 
 pub(super) fn router() -> Router<AppState> {
@@ -83,10 +84,35 @@ async fn set_project_members(
         ));
     }
 
+    // Capture the existing assignees so we only notify members who are newly
+    // added by this call (replace_set is idempotent for already-assigned users).
+    let existing_user_ids: Vec<Uuid> =
+        match ProjectMemberRepository::list_by_project(state.pool(), project_id).await {
+            Ok(members) => members.into_iter().map(|m| m.user_id).collect(),
+            Err(e) => return Err(db_error(e, "failed to list project members")),
+        };
+
     let txid =
         ProjectMemberRepository::replace_set(state.pool(), project_id, &payload.user_ids, ctx.user.id)
             .await
             .map_err(|e| db_error(e, "failed to update project members"))?;
+
+    // Notify newly-assigned members (best-effort; never fail the request).
+    if let Ok(Some(project)) = ProjectRepository::find_by_id(state.pool(), project_id).await {
+        for &user_id in &payload.user_ids {
+            if user_id != ctx.user.id && !existing_user_ids.contains(&user_id) {
+                notify_project_assigned(
+                    state.pool(),
+                    org_id,
+                    ctx.user.id,
+                    user_id,
+                    project_id,
+                    project.name.clone(),
+                )
+                .await;
+            }
+        }
+    }
 
     let project_members = ProjectMemberRepository::list_by_project(state.pool(), project_id)
         .await
