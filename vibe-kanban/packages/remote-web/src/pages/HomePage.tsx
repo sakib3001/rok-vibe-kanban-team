@@ -8,6 +8,7 @@ import {
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import type { Project } from "shared/remote-types";
 import type { OrganizationWithRole } from "shared/types";
+import { MemberRole } from "shared/types";
 import { listOrganizationProjects } from "@remote/shared/lib/api";
 import { clearTokens } from "@remote/shared/lib/auth";
 import { SettingsDialog } from "@/shared/dialogs/settings/SettingsDialog";
@@ -314,15 +315,36 @@ function OrganizationSection({
   hostId: string | null;
   onRequireHost: () => void;
 }) {
+  const setSelectedOrgId = useOrganizationStore((s) => s.setSelectedOrgId);
   return (
     <section className="space-y-base">
       <header className="flex items-center justify-between gap-base">
         <h2 className="truncate text-lg font-medium text-high">
           {organization.name}
         </h2>
-        <p className="shrink-0 text-xs text-low">
-          {projects.length} {projects.length === 1 ? "project" : "projects"}
-        </p>
+        <div className="flex shrink-0 items-center gap-base">
+          {organization.user_role === MemberRole.ADMIN ? (
+            <>
+              <Link
+                to="/admin/projects"
+                onClick={() => setSelectedOrgId(organization.id)}
+                className="text-xs text-brand transition-colors hover:text-brand-hover"
+              >
+                Assign projects
+              </Link>
+              <Link
+                to="/admin/insights"
+                onClick={() => setSelectedOrgId(organization.id)}
+                className="text-xs text-brand transition-colors hover:text-brand-hover"
+              >
+                Team insights
+              </Link>
+            </>
+          ) : null}
+          <p className="text-xs text-low">
+            {projects.length} {projects.length === 1 ? "project" : "projects"}
+          </p>
+        </div>
       </header>
 
       {projects.length === 0 ? (

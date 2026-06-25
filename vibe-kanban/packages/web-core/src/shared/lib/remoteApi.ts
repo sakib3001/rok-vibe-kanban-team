@@ -157,6 +157,30 @@ export async function bulkUpdateProjectStatuses(
   }
 }
 
+/**
+ * IDs of the projects in `organizationId` assigned to the current user.
+ * Powers the launcher's "Personal" project view (filter-only — the user can
+ * still see all projects via the "Team" view).
+ */
+export async function listAssignedProjectIds(
+  organizationId: string
+): Promise<string[]> {
+  const response = await makeRequest(
+    `/v1/projects?organization_id=${encodeURIComponent(
+      organizationId
+    )}&assigned_to_me=true`,
+    { method: 'GET' }
+  );
+  if (!response.ok) {
+    throw await parseErrorResponse(
+      response,
+      'Failed to list assigned projects'
+    );
+  }
+  const body = (await response.json()) as { projects: { id: string }[] };
+  return body.projects.map((p) => p.id);
+}
+
 // ---------------------------------------------------------------------------
 // Relay host API functions (served by remote backend)
 // ---------------------------------------------------------------------------

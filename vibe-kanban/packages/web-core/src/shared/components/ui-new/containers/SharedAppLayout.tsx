@@ -53,6 +53,7 @@ import { AppBarNotificationBellContainer } from '@/pages/workspaces/AppBarNotifi
 import { WorkspacesSidebarContainer } from '@/pages/workspaces/WorkspacesSidebarContainer';
 import { WorkspacesSidebarReopenTag } from '@vibe/ui/components/WorkspacesSidebar';
 import { useRemoteCloudHostsAppBarModel } from '@/shared/hooks/useRemoteCloudHosts';
+import { listAssignedProjectIds } from '@/shared/lib/remoteApi';
 
 export function SharedAppLayout() {
   const appNavigation = useAppNavigation();
@@ -163,6 +164,49 @@ export function SharedAppLayout() {
       prevOrgIdRef.current = selectedOrgId;
     }
   }, [selectedOrgId, sortedProjects, isLoading, appNavigation]);
+
+  // --- Personal/Team project filter (filter-only: Team always shows all) ---
+  const [projectViewMode, setProjectViewMode] = useState<'personal' | 'team'>(
+    'team'
+  );
+  const [assignedProjectIds, setAssignedProjectIds] = useState<Set<string>>(
+    new Set()
+  );
+  const defaultedOrgRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!isSignedIn || !selectedOrgId) {
+      setAssignedProjectIds(new Set());
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const ids = await listAssignedProjectIds(selectedOrgId);
+        if (cancelled) return;
+        setAssignedProjectIds(new Set(ids));
+        // First load for this org: land on Personal if the user has any
+        // assignments, else Team. Manual toggles afterwards are preserved.
+        if (defaultedOrgRef.current !== selectedOrgId) {
+          defaultedOrgRef.current = selectedOrgId;
+          setProjectViewMode(ids.length > 0 ? 'personal' : 'team');
+        }
+      } catch {
+        if (!cancelled) setAssignedProjectIds(new Set());
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isSignedIn, selectedOrgId]);
+
+  const displayedProjects = useMemo(
+    () =>
+      projectViewMode === 'personal'
+        ? orderedProjects.filter((p) => assignedProjectIds.has(p.id))
+        : orderedProjects,
+    [projectViewMode, orderedProjects, assignedProjectIds]
+  );
 
   // Navigation state for AppBar active indicators
   const projectDestination = useMemo(
@@ -317,7 +361,7 @@ export function SharedAppLayout() {
             />
             {/* Desktop AppBar sidebar. */}
             <AppBar
-              projects={orderedProjects}
+              projects={displayedProjects}
               hosts={remoteCloudHosts}
               activeHostId={activeHostId}
               onCreateProject={handleCreateProject}
@@ -328,6 +372,10 @@ export function SharedAppLayout() {
               onProjectClick={handleProjectClick}
               onProjectsDragEnd={handleProjectsDragEnd}
               isSavingProjectOrder={isSavingProjectOrder}
+              showProjectViewToggle={isSignedIn && orderedProjects.length > 0}
+              projectViewMode={projectViewMode}
+              onProjectViewModeChange={setProjectViewMode}
+              isProjectReorderDisabled={projectViewMode === 'personal'}
               isWorkspacesActive={isWorkspacesActive}
               isExportActive={isExportActive}
               activeProjectId={activeProjectId}
@@ -460,10 +508,31 @@ export function SharedAppLayout() {
             {/* Divider */}
             {isSignedIn && <div className="border-t border-border mx-4" />}
 
+            {/* Personal/Team toggle */}
+            {isSignedIn && orderedProjects.length > 0 && (
+              <div className="flex gap-1 px-3 pt-3">
+                {(['personal', 'team'] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => setProjectViewMode(mode)}
+                    className={cn(
+                      'flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors cursor-pointer',
+                      projectViewMode === mode
+                        ? 'bg-brand/15 text-brand'
+                        : 'text-low hover:bg-secondary hover:text-normal'
+                    )}
+                  >
+                    {mode === 'personal' ? 'Personal' : 'Team'}
+                  </button>
+                ))}
+              </div>
+            )}
+
             {/* Project list */}
             <div className="flex-1 overflow-y-auto p-2">
               {isSignedIn ? (
-                orderedProjects.map((project) => (
+                displayedProjects.map((project) => (
                   <button
                     type="button"
                     key={project.id}

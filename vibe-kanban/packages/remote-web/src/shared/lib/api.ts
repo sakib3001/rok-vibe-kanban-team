@@ -1,7 +1,10 @@
 import { getToken, triggerRefresh } from "@remote/shared/lib/auth/tokenManager";
 import { clearTokens } from "@remote/shared/lib/auth";
 import type { Project } from "shared/remote-types";
-import type { ListOrganizationsResponse } from "shared/types";
+import type {
+  ListOrganizationsResponse,
+  OrganizationMemberWithProfile,
+} from "shared/types";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
 
@@ -202,6 +205,49 @@ export async function listOrganizations(): Promise<ListOrganizationsResponse> {
   return res.json();
 }
 
+// --- PM analytics (insights) ---
+// Phase 1 returns plain JSON from the remote server. The shape mirrors
+// `InsightsResponse` in crates/remote/src/routes/insights.rs. When that struct
+// gains a `TS` derive, replace these hand-written types with the generated ones.
+
+export type InsightsWindow = "7d" | "30d" | "all";
+
+export type DeveloperInsights = {
+  user_id: string;
+  email: string;
+  display_name: string;
+  username: string | null;
+  role: string;
+  last_active_at: string | null;
+  issues_assigned: number;
+  issues_completed: number;
+  mrs_opened: number;
+  mrs_merged: number;
+  score: number;
+};
+
+export type OrganizationInsightsResponse = {
+  organization_id: string;
+  window: string;
+  since: string | null;
+  generated_at: string;
+  developers: DeveloperInsights[];
+};
+
+export async function getOrganizationInsights(
+  organizationId: string,
+  window: InsightsWindow,
+): Promise<OrganizationInsightsResponse> {
+  const params = new URLSearchParams({ window });
+  const res = await authenticatedFetch(
+    `${API_BASE}/v1/organizations/${organizationId}/insights?${params}`,
+  );
+  if (!res.ok) {
+    throw new Error(`Failed to load insights (${res.status})`);
+  }
+  return res.json();
+}
+
 export async function getIdentity(): Promise<IdentityResponse> {
   const res = await authenticatedFetch(`${API_BASE}/v1/identity`);
   if (!res.ok) {
@@ -224,6 +270,64 @@ export async function listOrganizationProjects(
 
   const body = (await res.json()) as { projects: Project[] };
   return body.projects;
+}
+
+// --- Project assignment ---
+// Admin assigns whole projects to members; the launcher's Personal tab reads
+// the result. Types mirror api_types::ProjectMember / SetProjectMembersRequest.
+
+export type ProjectMember = {
+  id: string;
+  project_id: string;
+  user_id: string;
+  assigned_at: string;
+};
+
+export async function listOrganizationMembers(
+  organizationId: string,
+): Promise<OrganizationMemberWithProfile[]> {
+  const res = await authenticatedFetch(
+    `${API_BASE}/v1/organizations/${organizationId}/members`,
+  );
+  if (!res.ok) {
+    throw new Error(`Failed to list members (${res.status})`);
+  }
+  const body = (await res.json()) as {
+    members: OrganizationMemberWithProfile[];
+  };
+  return body.members;
+}
+
+export async function getProjectMembers(
+  projectId: string,
+): Promise<ProjectMember[]> {
+  const res = await authenticatedFetch(
+    `${API_BASE}/v1/projects/${projectId}/members`,
+  );
+  if (!res.ok) {
+    throw new Error(`Failed to load project members (${res.status})`);
+  }
+  const body = (await res.json()) as { project_members: ProjectMember[] };
+  return body.project_members;
+}
+
+export async function setProjectMembers(
+  projectId: string,
+  userIds: string[],
+): Promise<ProjectMember[]> {
+  const res = await authenticatedFetch(
+    `${API_BASE}/v1/projects/${projectId}/members`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ user_ids: userIds }),
+    },
+  );
+  if (!res.ok) {
+    throw new Error(`Failed to update project members (${res.status})`);
+  }
+  const body = (await res.json()) as { project_members: ProjectMember[] };
+  return body.project_members;
 }
 
 export type CredentialLoginResponse = {

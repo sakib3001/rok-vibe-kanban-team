@@ -33,6 +33,8 @@ mod github_app;
 pub mod hosts;
 mod identity;
 pub mod issue_assignees;
+pub mod insights;
+pub mod project_members;
 pub mod issue_comment_reactions;
 pub mod issue_comments;
 pub mod issue_followers;
@@ -116,6 +118,8 @@ pub fn router(state: AppState) -> Router {
         .merge(projects::router())
         .merge(organizations::router())
         .merge(organization_members::protected_router())
+        .merge(insights::router())
+        .merge(project_members::router())
         .merge(oauth::protected_router())
         .merge(electric_proxy::router())
         .merge(github_app::protected_router())

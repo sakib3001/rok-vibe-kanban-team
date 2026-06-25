@@ -40,6 +40,10 @@ pub struct UpdateProjectRequest {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ListProjectsQuery {
     pub organization_id: Uuid,
+    /// When true, return only the projects assigned to the calling user
+    /// (the "Personal" view). Defaults to false (all org projects).
+    #[serde(default)]
+    pub assigned_to_me: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

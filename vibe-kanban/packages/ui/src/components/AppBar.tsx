@@ -13,6 +13,8 @@ import {
   KanbanIcon,
   SpinnerIcon,
   StarIcon,
+  UserIcon,
+  UsersThreeIcon,
   type Icon,
 } from '@phosphor-icons/react';
 import { cn } from '../lib/cn';
@@ -56,6 +58,12 @@ interface AppBarProps {
   onProjectClick: (projectId: string) => void;
   onProjectsDragEnd: (result: DropResult) => void;
   isSavingProjectOrder?: boolean;
+  /** Show the Personal/Team project filter toggle. */
+  showProjectViewToggle?: boolean;
+  projectViewMode?: 'personal' | 'team';
+  onProjectViewModeChange?: (mode: 'personal' | 'team') => void;
+  /** Disable drag-reorder (e.g. while the project list is filtered). */
+  isProjectReorderDisabled?: boolean;
   isWorkspacesActive: boolean;
   isExportActive?: boolean;
   activeProjectId: string | null;
@@ -153,8 +161,15 @@ type AppBarSectionItem =
       projects: AppBarProject[];
       activeProjectId: string | null;
       isSavingProjectOrder?: boolean;
+      isReorderDisabled?: boolean;
       onProjectClick: (projectId: string) => void;
       onProjectsDragEnd: (result: DropResult) => void;
+    }
+  | {
+      key: string;
+      kind: 'view-toggle';
+      mode: 'personal' | 'team';
+      onChange: (mode: 'personal' | 'team') => void;
     };
 
 function getStandardAppBarButtonClassName({
@@ -208,6 +223,10 @@ export function AppBar({
   onProjectClick,
   onProjectsDragEnd,
   isSavingProjectOrder,
+  showProjectViewToggle = false,
+  projectViewMode = 'team',
+  onProjectViewModeChange,
+  isProjectReorderDisabled = false,
   isWorkspacesActive,
   isExportActive = false,
   activeProjectId,
@@ -296,6 +315,15 @@ export function AppBar({
     projectSectionItems.push({ key: 'projects-loading', kind: 'loading' });
   }
 
+  if (showProjectViewToggle && isSignedIn && onProjectViewModeChange) {
+    projectSectionItems.push({
+      key: 'project-view-toggle',
+      kind: 'view-toggle',
+      mode: projectViewMode,
+      onChange: onProjectViewModeChange,
+    });
+  }
+
   if (projects.length > 0) {
     projectSectionItems.push({
       key: 'project-list',
@@ -303,6 +331,7 @@ export function AppBar({
       projects,
       activeProjectId,
       isSavingProjectOrder,
+      isReorderDisabled: isProjectReorderDisabled,
       onProjectClick,
       onProjectsDragEnd,
     });
@@ -440,13 +469,46 @@ export function AppBar({
             <SpinnerIcon className="size-5 animate-spin text-muted" />
           </div>
         );
+      case 'view-toggle': {
+        const toggles: {
+          mode: 'personal' | 'team';
+          label: string;
+          icon: Icon;
+        }[] = [
+          { mode: 'personal', label: 'My projects', icon: UserIcon },
+          { mode: 'team', label: 'All projects', icon: UsersThreeIcon },
+        ];
+        return (
+          <div className="flex flex-col items-center gap-1">
+            {toggles.map(({ mode, label, icon: ToggleIcon }) => (
+              <Tooltip key={mode} content={label} side="right">
+                <button
+                  type="button"
+                  onClick={() => item.onChange(mode)}
+                  aria-label={label}
+                  aria-pressed={item.mode === mode}
+                  className={cn(
+                    'flex items-center justify-center w-10 h-8 rounded-lg transition-colors',
+                    'focus:outline-none focus-visible:ring-2 focus-visible:ring-brand cursor-pointer',
+                    item.mode === mode
+                      ? 'bg-brand/20 text-brand'
+                      : 'bg-primary text-low hover:bg-brand/10 hover:text-normal'
+                  )}
+                >
+                  <ToggleIcon className="size-icon-base" weight="bold" />
+                </button>
+              </Tooltip>
+            ))}
+          </div>
+        );
+      }
       case 'project-list':
         return (
           <DragDropContext onDragEnd={item.onProjectsDragEnd}>
             <Droppable
               droppableId="app-bar-projects"
               direction="vertical"
-              isDropDisabled={item.isSavingProjectOrder}
+              isDropDisabled={item.isSavingProjectOrder || item.isReorderDisabled}
             >
               {(dropProvided) => (
                 <div
@@ -460,7 +522,9 @@ export function AppBar({
                       draggableId={project.id}
                       index={index}
                       disableInteractiveElementBlocking
-                      isDragDisabled={item.isSavingProjectOrder}
+                      isDragDisabled={
+                        item.isSavingProjectOrder || item.isReorderDisabled
+                      }
                     >
                       {(dragProvided, snapshot) => (
                         <div

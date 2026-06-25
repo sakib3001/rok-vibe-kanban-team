@@ -18,7 +18,10 @@ use super::{
 use crate::{
     AppState,
     auth::RequestContext,
-    db::{get_txid, projects::ProjectRepository, types::is_valid_hsl_color},
+    db::{
+        get_txid, project_members::ProjectMemberRepository, projects::ProjectRepository,
+        types::is_valid_hsl_color,
+    },
     mutation_definition::MutationBuilder,
 };
 
@@ -50,12 +53,25 @@ async fn list_projects(
 ) -> Result<Json<ListProjectsResponse>, ErrorResponse> {
     ensure_member_access(state.pool(), query.organization_id, ctx.user.id).await?;
 
-    let projects = ProjectRepository::list_by_organization(state.pool(), query.organization_id)
+    let projects = if query.assigned_to_me {
+        ProjectMemberRepository::list_assigned_projects(
+            state.pool(),
+            query.organization_id,
+            ctx.user.id,
+        )
         .await
         .map_err(|error| {
-            tracing::error!(?error, organization_id = %query.organization_id, "failed to list projects");
+            tracing::error!(?error, organization_id = %query.organization_id, "failed to list assigned projects");
             ErrorResponse::new(StatusCode::INTERNAL_SERVER_ERROR, "failed to list projects")
-        })?;
+        })?
+    } else {
+        ProjectRepository::list_by_organization(state.pool(), query.organization_id)
+            .await
+            .map_err(|error| {
+                tracing::error!(?error, organization_id = %query.organization_id, "failed to list projects");
+                ErrorResponse::new(StatusCode::INTERNAL_SERVER_ERROR, "failed to list projects")
+            })?
+    };
 
     Ok(Json(ListProjectsResponse { projects }))
 }
