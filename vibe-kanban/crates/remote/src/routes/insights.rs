@@ -83,6 +83,36 @@ pub struct DeveloperInsights {
     pub score: i64,
 }
 
+/// One weekly bucket of completed-issue counts (delivery throughput).
+#[derive(Debug, Serialize)]
+pub struct ThroughputBucket {
+    pub week_start: DateTime<Utc>,
+    pub count: i64,
+}
+
+/// Org-level delivery metrics over the selected window. Cycle time = time from
+/// issue creation to completion (Done); throughput = issues completed per week.
+#[derive(Debug, Serialize)]
+pub struct DeliverySummary {
+    pub completed_count: i64,
+    pub avg_cycle_time_hours: Option<f64>,
+    pub median_cycle_time_hours: Option<f64>,
+    pub throughput: Vec<ThroughputBucket>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct CycleRow {
+    completed_count: i64,
+    avg_hours: Option<f64>,
+    median_hours: Option<f64>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct BucketRow {
+    week_start: DateTime<Utc>,
+    count: i64,
+}
+
 #[derive(Debug, Serialize)]
 pub struct InsightsResponse {
     pub organization_id: Uuid,
@@ -90,6 +120,7 @@ pub struct InsightsResponse {
     pub since: Option<DateTime<Utc>>,
     pub generated_at: DateTime<Utc>,
     pub developers: Vec<DeveloperInsights>,
+    pub summary: DeliverySummary,
 }
 
 fn display_name(row: &InsightsRow) -> String {
@@ -230,11 +261,65 @@ async fn get_organization_insights(
             .then(b.last_active_at.cmp(&a.last_active_at))
     });
 
+    // Delivery summary: cycle time (created -> completed) over the window.
+    let cycle = sqlx::query_as::<_, CycleRow>(
+        r#"
+        SELECT
+            COUNT(*)::bigint AS completed_count,
+            AVG(EXTRACT(EPOCH FROM (i.completed_at - i.created_at))::double precision / 3600.0) AS avg_hours,
+            PERCENTILE_CONT(0.5) WITHIN GROUP (
+                ORDER BY EXTRACT(EPOCH FROM (i.completed_at - i.created_at))::double precision / 3600.0
+            ) AS median_hours
+        FROM issues i
+        WHERE i.project_id IN (SELECT id FROM projects WHERE organization_id = $1)
+          AND i.completed_at IS NOT NULL
+          AND ($2::timestamptz IS NULL OR i.completed_at >= $2)
+        "#,
+    )
+    .bind(org_id)
+    .bind(since)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(|e| db_error(e, "Failed to load cycle time"))?;
+
+    // Throughput: completed issues per ISO week.
+    let buckets = sqlx::query_as::<_, BucketRow>(
+        r#"
+        SELECT date_trunc('week', i.completed_at) AS week_start,
+               COUNT(*)::bigint AS count
+        FROM issues i
+        WHERE i.project_id IN (SELECT id FROM projects WHERE organization_id = $1)
+          AND i.completed_at IS NOT NULL
+          AND ($2::timestamptz IS NULL OR i.completed_at >= $2)
+        GROUP BY 1
+        ORDER BY 1
+        "#,
+    )
+    .bind(org_id)
+    .bind(since)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|e| db_error(e, "Failed to load throughput"))?;
+
+    let summary = DeliverySummary {
+        completed_count: cycle.completed_count,
+        avg_cycle_time_hours: cycle.avg_hours,
+        median_cycle_time_hours: cycle.median_hours,
+        throughput: buckets
+            .into_iter()
+            .map(|b| ThroughputBucket {
+                week_start: b.week_start,
+                count: b.count,
+            })
+            .collect(),
+    };
+
     Ok(Json(InsightsResponse {
         organization_id: org_id,
         window,
         since,
         generated_at: now,
         developers,
+        summary,
     }))
 }

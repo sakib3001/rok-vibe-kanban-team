@@ -226,12 +226,25 @@ export type DeveloperInsights = {
   score: number;
 };
 
+export type ThroughputBucket = {
+  week_start: string;
+  count: number;
+};
+
+export type DeliverySummary = {
+  completed_count: number;
+  avg_cycle_time_hours: number | null;
+  median_cycle_time_hours: number | null;
+  throughput: ThroughputBucket[];
+};
+
 export type OrganizationInsightsResponse = {
   organization_id: string;
   window: string;
   since: string | null;
   generated_at: string;
   developers: DeveloperInsights[];
+  summary: DeliverySummary;
 };
 
 export async function getOrganizationInsights(

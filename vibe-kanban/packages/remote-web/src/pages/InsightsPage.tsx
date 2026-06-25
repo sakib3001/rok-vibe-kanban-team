@@ -11,6 +11,7 @@ import {
 } from "@/shared/stores/useOrganizationStore";
 import {
   getOrganizationInsights,
+  type DeliverySummary,
   type DeveloperInsights,
   type InsightsWindow,
 } from "@remote/shared/lib/api";
@@ -31,6 +32,20 @@ type SortKey =
   | "last_active_at";
 
 type Row = DeveloperInsights & { rank: number };
+
+function formatDuration(hours: number | null): string {
+  if (hours == null) return "—";
+  if (hours < 1) return `${Math.round(hours * 60)}m`;
+  if (hours < 24) return `${hours.toFixed(1)}h`;
+  const days = hours / 24;
+  return `${days.toFixed(1)}d`;
+}
+
+function formatWeek(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
 
 function formatLastActive(iso: string | null): string {
   if (!iso) return "—";
@@ -259,6 +274,10 @@ export default function InsightsPage() {
         </div>
       </div>
 
+      {!error && data?.summary ? (
+        <DeliverySection summary={data.summary} loading={insightsLoading} />
+      ) : null}
+
       {error ? (
         <div className="mt-base rounded-sm border border-destructive/40 bg-secondary p-base text-sm text-destructive">
           {error instanceof Error ? error.message : "Failed to load insights."}
@@ -280,6 +299,77 @@ export default function InsightsPage() {
         ×1. Issues done = issues in a “Done” status assigned to the developer;
         MRs are attributed via the developer's workspace.
       </p>
+    </div>
+  );
+}
+
+function StatCard({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-sm border border-border bg-secondary px-base py-base">
+      <p className="text-xs text-low">{label}</p>
+      <p className="mt-half text-2xl font-semibold text-high tabular-nums">
+        {value}
+      </p>
+    </div>
+  );
+}
+
+function DeliverySection({
+  summary,
+  loading,
+}: {
+  summary: DeliverySummary;
+  loading: boolean;
+}) {
+  const maxCount = Math.max(1, ...summary.throughput.map((b) => b.count));
+  return (
+    <div className={`mt-base ${loading ? "opacity-60" : ""}`}>
+      <div className="grid gap-base sm:grid-cols-3">
+        <StatCard
+          label="Completed (in window)"
+          value={summary.completed_count.toLocaleString()}
+        />
+        <StatCard
+          label="Avg cycle time"
+          value={formatDuration(summary.avg_cycle_time_hours)}
+        />
+        <StatCard
+          label="Median cycle time"
+          value={formatDuration(summary.median_cycle_time_hours)}
+        />
+      </div>
+
+      <div className="mt-base rounded-sm border border-border bg-secondary p-base">
+        <p className="text-xs text-low">Throughput (issues completed / week)</p>
+        {summary.throughput.length === 0 ? (
+          <p className="mt-base text-sm text-low">
+            No issues completed in this window yet.
+          </p>
+        ) : (
+          <div className="mt-base flex h-32 items-end gap-1 overflow-x-auto">
+            {summary.throughput.map((b) => (
+              <div
+                key={b.week_start}
+                className="flex min-w-6 flex-1 flex-col items-center justify-end gap-1"
+                title={`Week of ${formatWeek(b.week_start)}: ${b.count}`}
+              >
+                <span className="text-xs tabular-nums text-normal">
+                  {b.count}
+                </span>
+                <div
+                  className="w-full rounded-t-sm bg-brand"
+                  style={{
+                    height: `${Math.max(4, (b.count / maxCount) * 96)}px`,
+                  }}
+                />
+                <span className="text-[10px] text-low">
+                  {formatWeek(b.week_start)}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
