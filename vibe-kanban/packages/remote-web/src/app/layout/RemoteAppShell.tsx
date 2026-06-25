@@ -8,8 +8,21 @@ import {
 import { useQuery } from "@tanstack/react-query";
 import { useLocation, useNavigate, useParams } from "@tanstack/react-router";
 import { siDiscord, siGithub } from "simple-icons";
-import { AppBar, type AppBarHostStatus } from "@vibe/ui/components/AppBar";
-import { XIcon, PlusIcon, HouseIcon, KanbanIcon } from "@phosphor-icons/react";
+import {
+  AppBar,
+  type AppBarHostStatus,
+  type AppBarNavItem,
+} from "@vibe/ui/components/AppBar";
+import {
+  XIcon,
+  PlusIcon,
+  HouseIcon,
+  KanbanIcon,
+  ChartBarIcon,
+  CheckCircleIcon,
+  UsersThreeIcon,
+} from "@phosphor-icons/react";
+import { MemberRole } from "shared/types";
 import { MobileDrawer } from "@vibe/ui/components/MobileDrawer";
 import type { Project } from "shared/remote-types";
 import { useIsMobile } from "@/shared/hooks/useIsMobile";
@@ -223,6 +236,38 @@ export function RemoteAppShell({ children }: RemoteAppShellProps) {
     openRelaySettings();
   }, [openRelaySettings]);
 
+  const isAdmin = useMemo(
+    () => organizations.some((o) => o.user_role === MemberRole.ADMIN),
+    [organizations],
+  );
+
+  const adminItems = useMemo<AppBarNavItem[]>(() => {
+    if (!isSignedIn || !isAdmin) return [];
+    return [
+      {
+        key: "admin-projects",
+        label: "Assign projects",
+        icon: UsersThreeIcon,
+        isActive: location.pathname === "/admin/projects",
+        onClick: () => navigate({ to: "/admin/projects" }),
+      },
+      {
+        key: "admin-approvals",
+        label: "Approvals",
+        icon: CheckCircleIcon,
+        isActive: location.pathname === "/admin/approvals",
+        onClick: () => navigate({ to: "/admin/approvals" }),
+      },
+      {
+        key: "admin-insights",
+        label: "Team insights",
+        icon: ChartBarIcon,
+        isActive: location.pathname === "/admin/insights",
+        onClick: () => navigate({ to: "/admin/insights" }),
+      },
+    ];
+  }, [isSignedIn, isAdmin, location.pathname, navigate]);
+
   const mobileUserSlot = useMemo(() => {
     if (!isMobile) return undefined;
     return (
@@ -260,6 +305,7 @@ export function RemoteAppShell({ children }: RemoteAppShellProps) {
             activeProjectId={activeProjectId}
             isSignedIn={isSignedIn}
             isLoadingProjects={isLoadingProjects}
+            adminItems={adminItems}
             onSignIn={() => {
               navigate({ to: "/account" });
             }}

@@ -64,6 +64,8 @@ interface AppBarProps {
   onProjectViewModeChange?: (mode: 'personal' | 'team') => void;
   /** Disable drag-reorder (e.g. while the project list is filtered). */
   isProjectReorderDisabled?: boolean;
+  /** Optional admin nav icons rendered as their own section. */
+  adminItems?: AppBarNavItem[];
   isWorkspacesActive: boolean;
   isExportActive?: boolean;
   activeProjectId: string | null;
@@ -87,6 +89,14 @@ export interface AppBarProject {
   id: string;
   name: string;
   color: string;
+}
+
+export interface AppBarNavItem {
+  key: string;
+  label: string;
+  icon: Icon;
+  isActive?: boolean;
+  onClick: () => void;
 }
 
 export type AppBarHostStatus = 'online' | 'offline' | 'unpaired';
@@ -121,7 +131,7 @@ const appBarItemBaseClassName =
   'flex items-center justify-center w-10 h-10 rounded-lg text-sm font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-brand';
 
 type AppBarSection = {
-  key: 'local' | 'remote' | 'projects' | 'export';
+  key: 'local' | 'remote' | 'projects' | 'admin' | 'export';
   label: string;
   items: AppBarSectionItem[];
 };
@@ -227,6 +237,7 @@ export function AppBar({
   projectViewMode = 'team',
   onProjectViewModeChange,
   isProjectReorderDisabled = false,
+  adminItems = [],
   isWorkspacesActive,
   isExportActive = false,
   activeProjectId,
@@ -354,6 +365,21 @@ export function AppBar({
       key: 'projects',
       label: 'Projects',
       items: projectSectionItems,
+    });
+  }
+
+  if (adminItems.length > 0) {
+    sections.push({
+      key: 'admin',
+      label: 'Admin',
+      items: adminItems.map((item) => ({
+        key: item.key,
+        kind: 'icon-button' as const,
+        label: item.label,
+        icon: item.icon,
+        isActive: item.isActive,
+        onClick: item.onClick,
+      })),
     });
   }
 
