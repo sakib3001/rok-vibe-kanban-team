@@ -343,6 +343,93 @@ export async function setProjectMembers(
   return body.project_members;
 }
 
+// --- Done-approval workflow ---
+
+export type PendingApproval = {
+  issue_id: string;
+  simple_id: string;
+  title: string;
+  project_id: string;
+  project_name: string;
+  assignees: string;
+  submitted_at: string;
+};
+
+export async function listPendingApprovals(
+  organizationId: string,
+): Promise<PendingApproval[]> {
+  const res = await authenticatedFetch(
+    `${API_BASE}/v1/organizations/${organizationId}/pending-approvals`,
+  );
+  if (!res.ok) {
+    throw new Error(`Failed to load pending approvals (${res.status})`);
+  }
+  const body = (await res.json()) as { pending: PendingApproval[] };
+  return body.pending;
+}
+
+export async function approveIssue(issueId: string): Promise<void> {
+  const res = await authenticatedFetch(
+    `${API_BASE}/v1/issues/${issueId}/approve`,
+    { method: "POST" },
+  );
+  if (!res.ok) {
+    throw new Error(`Failed to approve issue (${res.status})`);
+  }
+}
+
+export async function rejectIssue(
+  issueId: string,
+  note: string,
+): Promise<void> {
+  const res = await authenticatedFetch(
+    `${API_BASE}/v1/issues/${issueId}/reject`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ note: note || null }),
+    },
+  );
+  if (!res.ok) {
+    throw new Error(`Failed to reject issue (${res.status})`);
+  }
+}
+
+export type ProjectApprovalSetting = {
+  project_id: string;
+  requires_done_approval: boolean;
+};
+
+export async function listProjectApprovalSettings(
+  organizationId: string,
+): Promise<ProjectApprovalSetting[]> {
+  const res = await authenticatedFetch(
+    `${API_BASE}/v1/organizations/${organizationId}/project-approval-settings`,
+  );
+  if (!res.ok) {
+    throw new Error(`Failed to load approval settings (${res.status})`);
+  }
+  const body = (await res.json()) as { settings: ProjectApprovalSetting[] };
+  return body.settings;
+}
+
+export async function setProjectApprovalSetting(
+  projectId: string,
+  requiresDoneApproval: boolean,
+): Promise<void> {
+  const res = await authenticatedFetch(
+    `${API_BASE}/v1/projects/${projectId}/approval-setting`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ requires_done_approval: requiresDoneApproval }),
+    },
+  );
+  if (!res.ok) {
+    throw new Error(`Failed to update approval setting (${res.status})`);
+  }
+}
+
 export type CredentialLoginResponse = {
   access_token: string;
   refresh_token: string;

@@ -333,6 +333,13 @@ function OrganizationSection({
                 Assign projects
               </Link>
               <Link
+                to="/admin/approvals"
+                onClick={() => setSelectedOrgId(organization.id)}
+                className="text-xs text-brand transition-colors hover:text-brand-hover"
+              >
+                Approvals
+              </Link>
+              <Link
                 to="/admin/insights"
                 onClick={() => setSelectedOrgId(organization.id)}
                 className="text-xs text-brand transition-colors hover:text-brand-hover"

@@ -15,6 +15,7 @@ import { Route as ExportRouteImport } from './routes/export'
 import { Route as AccountRouteImport } from './routes/account'
 import { Route as AdminInsightsRouteImport } from './routes/admin.insights'
 import { Route as AdminProjectsRouteImport } from './routes/admin.projects'
+import { Route as AdminApprovalsRouteImport } from './routes/admin.approvals'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as ProjectsProjectIdRouteImport } from './routes/projects.$projectId'
 import { Route as LoginCompleteRouteImport } from './routes/login_.complete'
@@ -64,6 +65,11 @@ const AdminInsightsRoute = AdminInsightsRouteImport.update({
 const AdminProjectsRoute = AdminProjectsRouteImport.update({
   id: '/admin/projects',
   path: '/admin/projects',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AdminApprovalsRoute = AdminApprovalsRouteImport.update({
+  id: '/admin/approvals',
+  path: '/admin/approvals',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ProjectsProjectIdRoute = ProjectsProjectIdRouteImport.update({
@@ -155,6 +161,7 @@ export interface FileRoutesByFullPath {
   '/account': typeof AccountRoute
   '/admin/insights': typeof AdminInsightsRoute
   '/admin/projects': typeof AdminProjectsRoute
+  '/admin/approvals': typeof AdminApprovalsRoute
   '/export': typeof ExportRoute
   '/login': typeof LoginRoute
   '/notifications': typeof NotificationsRoute
@@ -178,6 +185,7 @@ export interface FileRoutesByTo {
   '/account': typeof AccountRoute
   '/admin/insights': typeof AdminInsightsRoute
   '/admin/projects': typeof AdminProjectsRoute
+  '/admin/approvals': typeof AdminApprovalsRoute
   '/export': typeof ExportRoute
   '/login': typeof LoginRoute
   '/notifications': typeof NotificationsRoute
@@ -202,6 +210,7 @@ export interface FileRoutesById {
   '/account': typeof AccountRoute
   '/admin/insights': typeof AdminInsightsRoute
   '/admin/projects': typeof AdminProjectsRoute
+  '/admin/approvals': typeof AdminApprovalsRoute
   '/export': typeof ExportRoute
   '/login': typeof LoginRoute
   '/notifications': typeof NotificationsRoute
@@ -227,6 +236,7 @@ export interface FileRouteTypes {
     | '/account'
     | '/admin/insights'
     | '/admin/projects'
+    | '/admin/approvals'
     | '/export'
     | '/login'
     | '/notifications'
@@ -250,6 +260,7 @@ export interface FileRouteTypes {
     | '/account'
     | '/admin/insights'
     | '/admin/projects'
+    | '/admin/approvals'
     | '/export'
     | '/login'
     | '/notifications'
@@ -273,6 +284,7 @@ export interface FileRouteTypes {
     | '/account'
     | '/admin/insights'
     | '/admin/projects'
+    | '/admin/approvals'
     | '/export'
     | '/login'
     | '/notifications'
@@ -297,6 +309,7 @@ export interface RootRouteChildren {
   AccountRoute: typeof AccountRoute
   AdminInsightsRoute: typeof AdminInsightsRoute
   AdminProjectsRoute: typeof AdminProjectsRoute
+  AdminApprovalsRoute: typeof AdminApprovalsRoute
   ExportRoute: typeof ExportRoute
   LoginRoute: typeof LoginRoute
   NotificationsRoute: typeof NotificationsRoute
@@ -357,6 +370,13 @@ declare module '@tanstack/react-router' {
       path: '/admin/projects'
       fullPath: '/admin/projects'
       preLoaderRoute: typeof AdminProjectsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/admin/approvals': {
+      id: '/admin/approvals'
+      path: '/admin/approvals'
+      fullPath: '/admin/approvals'
+      preLoaderRoute: typeof AdminApprovalsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/': {
@@ -486,6 +506,7 @@ const rootRouteChildren: RootRouteChildren = {
   AccountRoute: AccountRoute,
   AdminInsightsRoute: AdminInsightsRoute,
   AdminProjectsRoute: AdminProjectsRoute,
+  AdminApprovalsRoute: AdminApprovalsRoute,
   ExportRoute: ExportRoute,
   LoginRoute: LoginRoute,
   NotificationsRoute: NotificationsRoute,

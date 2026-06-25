@@ -12,6 +12,8 @@ import {
   getProjectMembers,
   listOrganizationMembers,
   listOrganizationProjects,
+  listProjectApprovalSettings,
+  setProjectApprovalSetting,
   setProjectMembers,
 } from "@remote/shared/lib/api";
 
@@ -45,6 +47,24 @@ export default function ProjectAssignmentsPage() {
     queryKey: ["org-members", orgId],
     queryFn: () => listOrganizationMembers(orgId as string),
     enabled: !!orgId,
+  });
+  const approvalQuery = useQuery({
+    queryKey: ["project-approval-settings", orgId],
+    queryFn: () => listProjectApprovalSettings(orgId as string),
+    enabled: !!orgId,
+  });
+  const approvalByProject = useMemo(() => {
+    const map = new Map<string, boolean>();
+    (approvalQuery.data ?? []).forEach((s) =>
+      map.set(s.project_id, s.requires_done_approval),
+    );
+    return map;
+  }, [approvalQuery.data]);
+
+  const toggleApproval = useMutation({
+    mutationFn: ({ projectId, value }: { projectId: string; value: boolean }) =>
+      setProjectApprovalSetting(projectId, value),
+    onSuccess: () => approvalQuery.refetch(),
   });
 
   const projects = useMemo(
@@ -136,6 +156,10 @@ export default function ProjectAssignmentsPage() {
               assigned={assignmentQueries[i]?.data ?? []}
               loading={assignmentQueries[i]?.isLoading ?? false}
               onSaved={() => assignmentQueries[i]?.refetch()}
+              requiresApproval={approvalByProject.get(project.id) ?? false}
+              onToggleApproval={(value) =>
+                toggleApproval.mutate({ projectId: project.id, value })
+              }
             />
           ))}
         </ul>
@@ -151,6 +175,8 @@ function ProjectRow({
   assigned,
   loading,
   onSaved,
+  requiresApproval,
+  onToggleApproval,
 }: {
   projectId: string;
   projectName: string;
@@ -158,6 +184,8 @@ function ProjectRow({
   assigned: { user_id: string }[];
   loading: boolean;
   onSaved: () => void;
+  requiresApproval: boolean;
+  onToggleApproval: (value: boolean) => void;
 }) {
   const [editing, setEditing] = useState(false);
   const assignedIds = useMemo(
@@ -207,15 +235,25 @@ function ProjectRow({
                 : `${assignedNames.length} assigned: ${assignedNames.join(", ")}`}
           </p>
         </div>
-        {!editing ? (
-          <button
-            type="button"
-            onClick={startEditing}
-            className="shrink-0 rounded-sm border border-border bg-secondary px-base py-half text-xs font-medium text-normal hover:border-brand/60 hover:text-high"
-          >
-            Manage
-          </button>
-        ) : null}
+        <div className="flex shrink-0 items-center gap-base">
+          <label className="flex items-center gap-half text-xs text-low">
+            <input
+              type="checkbox"
+              checked={requiresApproval}
+              onChange={(e) => onToggleApproval(e.target.checked)}
+            />
+            Require approval
+          </label>
+          {!editing ? (
+            <button
+              type="button"
+              onClick={startEditing}
+              className="rounded-sm border border-border bg-secondary px-base py-half text-xs font-medium text-normal hover:border-brand/60 hover:text-high"
+            >
+              Manage
+            </button>
+          ) : null}
+        </div>
       </div>
 
       {editing ? (
