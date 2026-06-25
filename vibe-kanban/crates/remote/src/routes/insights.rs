@@ -146,15 +146,14 @@ async fn get_organization_insights(
             GROUP BY ia.user_id
         ),
         issues_completed AS (
-            -- Completion is tracked via status (the `completed_at` column is not
-            -- populated by the app), so a "Done" status is the source of truth.
+            -- completed_at is kept in sync with the Done status by a DB trigger
+            -- (migration 20260625010000), so it gives accurate time windows.
             SELECT ia.user_id, COUNT(DISTINCT i.id)::bigint AS issues_completed
             FROM issues i
-            JOIN project_statuses ps ON ps.id = i.status_id
             JOIN issue_assignees ia ON ia.issue_id = i.id
             WHERE i.project_id IN (SELECT id FROM org_projects)
-              AND ps.name = 'Done'
-              AND ($2::timestamptz IS NULL OR i.updated_at >= $2)
+              AND i.completed_at IS NOT NULL
+              AND ($2::timestamptz IS NULL OR i.completed_at >= $2)
             GROUP BY ia.user_id
         ),
         mrs_opened AS (
